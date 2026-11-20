@@ -1,0 +1,32 @@
+{
+  "name": "articl",
+  "version": "0.1.0",
+  "private": true,
+  "scripts": {
+    "dev": "node scripts/with-root-env.mjs next dev",
+    "build": "node scripts/with-root-env.mjs next build",
+    "start": "node scripts/with-root-env.mjs next start",
+    "lint": "eslint",
+    "inngest": "inngest-cli dev -u http://localhost:3000/api/inngest --no-discovery"
+  },
+  "dependencies": {
+    "@supabase/supabase-js": "^2.119.1",
+    "inngest": "^4.26.2",
+    "next": "16.4.6",
+    "react": "19.3.0",
+    "react-dom": "19.3.0",
+    "server-only": "^0.0.1",
+    "unpdf": "^2.2.1"
+  },
+  "devDependencies": {
+    "@tailwindcss/turbopack": "4.3.3",
+    "@types/node": "^20",
+    "@types/react": "^19",
+    "@types/react-dom": "^19",
+    "eslint": "^9",
+    "eslint-config-next": "16.4.6",
+    "inngest-cli": "^1.53.0",
+    "tailwindcss": "4.3.3",
+    "typescript": "^5"
+  }
+}
