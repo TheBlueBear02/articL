@@ -19,7 +19,8 @@ export async function POST(request: Request, ctx: RouteContext<"/api/jobs/[id]/s
     return Response.json({ error: `Select between 1 and ${MAX_SELECTED_POINTS} points.` }, { status: 400 });
   }
 
-  // Optional add-ons: { music?: "calm" | "upbeat" | "dramatic", split?: "gameplay" | "satisfying" }
+  // Optional add-ons: { music?: "calm" | "upbeat" | "dramatic", split?: "gameplay" | "satisfying",
+  //   gameplayClip?: string, popups?: boolean }
   const rawAddons = body?.addons ?? {};
   if (typeof rawAddons !== "object" || Array.isArray(rawAddons)) {
     return Response.json({ error: "addons must be an object." }, { status: 400 });
@@ -42,6 +43,12 @@ export async function POST(request: Request, ctx: RouteContext<"/api/jobs/[id]/s
       return Response.json({ error: "gameplayClip needs split \"gameplay\" and a clip path." }, { status: 400 });
     }
     addons.gameplayClip = rawAddons.gameplayClip;
+  }
+  if (rawAddons.popups != null) {
+    if (typeof rawAddons.popups !== "boolean") {
+      return Response.json({ error: "popups must be true or false." }, { status: 400 });
+    }
+    if (rawAddons.popups) addons.popups = true;
   }
   // Library-backed choices need files in the library (Pixabay "satisfying" clips don't).
   if (addons.music || addons.split === "gameplay") {

@@ -1,5 +1,5 @@
 // Phase 3 script checks. Pure (type-only imports), so they can be tested with plain node.
-import type { CandidatePoint, Script, StudySetting } from "./jobs";
+import type { CandidatePoint, Popup, Script, StudySetting } from "./jobs";
 
 /** ~150 words is ~55 s at TTS speed 1.1 (measured: the spike's 20 words took 5.97 s). */
 export const DEFAULT_MAX_WORDS = 150;
@@ -78,6 +78,23 @@ export function verifyCredit(credit: string | undefined, articleText: string): s
   if (!names.length || !names.every((n) => front.includes(plain(n)))) return undefined;
   if (names.length >= 3 || hadEtAl) return withYear(`${names[0]} et al.`);
   return withYear(names.length === 2 ? `${names[0]} & ${names[1]}` : names[0]);
+}
+
+const NUMBER_WORDS: Record<string, number> = {
+  one: 1, two: 2, three: 3, four: 4, five: 5, six: 6, seven: 7, eight: 8, nine: 9, ten: 10,
+  eleven: 11, twelve: 12, thirteen: 13, fourteen: 14, fifteen: 15, sixteen: 16, seventeen: 17,
+  eighteen: 18, nineteen: 19, twenty: 20, thirty: 30, forty: 40, fifty: 50, sixty: 60,
+  seventy: 70, eighty: 80, ninety: 90, hundred: 100,
+};
+
+/**
+ * Numbers a point gives, as digits, including ones the article spells out. Testing: a point quoting
+ * "one-of-eight male villagers" left the model no legal way to say it (digits required, but "8" wasn't
+ * in the point), so it converted to "12.5 percent" and the run failed.
+ */
+function pointNumbers(s: string): string[] {
+  const spelled = (s.toLowerCase().match(/\b[a-z]+\b/g) ?? []).filter((w) => w in NUMBER_WORDS).map((w) => String(NUMBER_WORDS[w]));
+  return [...numbersIn(s), ...spelled];
 }
 
 /** Digits as written, thousands separators removed: "13,165" -> "13165". */
@@ -170,11 +187,23 @@ export function autoFixScript(script: Script, points: CandidatePoint[]): { scrip
   };
   // Testing: the model often put where/when in its own first beat ("setting", "studySetting") instead of
   // opening the first point's beat with it. Merge it into the next beat rather than spend a rewrite.
+  // Testing also saw a separate "rehook" beat: any beat that isn't a chosen point joins the next beat
+  // (or the previous one, if it's last).
   let beats = script.beats;
   const ids = new Set(points.map((p) => p.id));
-  if (beats.length > 1 && !ids.has(beats[0].pointId) && ids.has(beats[1].pointId)) {
-    fixes.push(`Merged the separate "${beats[0].pointId}" beat into beat ${beats[1].pointId}`);
-    beats = [{ ...beats[1], text: `${beats[0].text.trim()} ${beats[1].text.trim()}` }, ...beats.slice(2)];
+  for (let i = 0; i < beats.length && beats.length > 1; ) {
+    if (ids.has(beats[i].pointId)) {
+      i++;
+      continue;
+    }
+    const stray = beats[i];
+    const j = i + 1 < beats.length ? i + 1 : i - 1;
+    const target = beats[j];
+    if (!ids.has(target.pointId)) break; // two strays in a row: leave it to the checks
+    const text = j > i ? `${stray.text.trim()} ${target.text.trim()}` : `${target.text.trim()} ${stray.text.trim()}`;
+    fixes.push(`Merged the separate "${stray.pointId}" beat into beat ${target.pointId}`);
+    const merged = { ...target, text, popup: target.popup?.word ? target.popup : stray.popup };
+    beats = beats.flatMap((b, k) => (k === i ? [] : k === j ? [merged] : [b]));
   }
   // The payoff beat belongs last; moving it there has one right answer, so don't spend a rewrite on it.
   const payoffAt = beats.findIndex((b) => b.pointId === script.payoffPointId);
@@ -186,12 +215,57 @@ export function autoFixScript(script: Script, points: CandidatePoint[]): { scrip
   const fixed: Script = {
     ...script,
     hook: fix("Hook", script.hook),
-    beats: beats.map((b) => ({ ...b, text: fix(`Beat ${b.pointId}`, b.text) })),
+    beats: beats.map((b) => {
+      const text = fix(`Beat ${b.pointId}`, b.text);
+      const popup = cleanPopup(b.popup, text);
+      if (b.popup?.word && !popup) fixes.push(`Beat ${b.pointId}: dropped pop-up "${b.popup.word}"`);
+      return { ...b, text, popup };
+    }),
     closing: fix("Closing", script.closing),
     hookTitle: script.hookTitle === undefined ? undefined : fix("Hook title", script.hookTitle, true),
     postCaption: script.postCaption === undefined ? undefined : fix("Post caption", script.postCaption),
   };
   return { script: fixed, fixes };
+}
+
+const plainWords = (s: string) => s.toLowerCase().replace(/[’']/g, "'").replace(/[^a-z0-9' ]+/g, " ").replace(/\s+/g, " ").trim();
+/** Same word up to a plural or possessive ending, so the pop-up word "village" matches "villages"
+ *  (testing: most pop-ups were lost to plurals). */
+const sameWord = (a: string, b: string) => {
+  const base = (w: string) => w.replace(/'s?$/, "");
+  const [x, y] = [base(a), base(b)];
+  return x === y || x + "s" === y || y + "s" === x || x + "es" === y || y + "es" === x;
+};
+// Pop-up words that can't be photographed (testing: "strange part", and numbers despite the prompt).
+const ABSTRACT = new Set(
+  "part parts result results effect effects influence change changes difference finding findings study surprise share percent percentage points thing things way".split(" "),
+);
+
+/**
+ * Keep a beat's pop-up only if it can be timed and searched: 1-3 words, no digits, said in the beat
+ * (so the word timestamps can place it), and a search to look it up. Never a reason to rewrite.
+ */
+export function cleanPopup(popup: Popup | undefined, beatText: string): Popup | undefined {
+  const word = plainWords(popup?.word ?? "");
+  const query = plainWords(popup?.query ?? "").split(" ").slice(0, 3).join(" ");
+  if (!query) return undefined;
+  const said = plainWords(beatText).split(" ");
+  // The beat's own spelling of `want`, matched word by word ("village" finds "villages").
+  const find = (want: string[]) => {
+    const at = said.findIndex((_, i) => want.every((x, k) => said[i + k] !== undefined && sameWord(said[i + k], x)));
+    return at < 0 ? undefined : said.slice(at, at + want.length).join(" ");
+  };
+  const usable = (w: string) => !!w && !/\d/.test(w) && countWords(w) <= 3 && !ABSTRACT.has(w.split(" ").pop()!); // main noun last: "strange PART"
+  const found = usable(word) ? find(word.split(" ")) : undefined;
+  if (found) return { word: found, query };
+  // Fallback: time it to a word of the photo search the beat says, main noun first. Testing: in
+  // beats with a number the model kept choosing the number ("45 percent") despite the prompt.
+  const keys = query.split(" ").filter((w) => w.length > 2 && usable(w));
+  for (const k of [...keys].reverse()) {
+    const hit = find([k]);
+    if (hit) return { word: hit, query };
+  }
+  return undefined;
 }
 
 /** Problems that only affect optional extras: the video can still be made without those fields. */
@@ -259,8 +333,8 @@ export function checkScript(
     }
   }
 
-  const allowedEverywhere = new Set(points.flatMap((p) => numbersIn(`${p.text} ${p.evidence}`)));
-  const byId = new Map(points.map((p) => [p.id, new Set(numbersIn(`${p.text} ${p.evidence}`))]));
+  const allowedEverywhere = new Set(points.flatMap((p) => pointNumbers(`${p.text} ${p.evidence}`)));
+  const byId = new Map(points.map((p) => [p.id, new Set(pointNumbers(`${p.text} ${p.evidence}`))]));
   // Where and when: the study's years (setting) and counts (setting or opening) may be said anywhere.
   const years = yearsIn(setting);
   const context = `${sourceOpening}\n${setting}`.trim();
@@ -369,6 +443,7 @@ export function scriptSegments(script: Script) {
       text: b.text,
       broll: b.broll,
       shots: b.shots,
+      popup: b.popup,
     })),
     { kind: "closing" as const, text: script.closing, broll: script.closingBroll, shots: script.closingShots },
   ];

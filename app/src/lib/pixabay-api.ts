@@ -2,7 +2,24 @@
 // test scripts. app/src/lib/pixabay.ts wraps these with the 24 h cache Pixabay requires.
 // Docs: https://pixabay.com/api/docs/
 
-export type PhotoHit = { id: number; largeImageURL: string; pageURL: string; user: string; tags: string };
+export type PhotoHit = {
+  id: number;
+  largeImageURL: string;
+  pageURL: string;
+  user: string;
+  tags: string;
+  /** 640 px version, for the AI photo check (older cache entries don't have it). */
+  webformatURL?: string;
+  /** "photo", "illustration" or "vector" (Pixabay's image_type filter lets some drawings through). */
+  type?: string;
+  isLowQuality?: boolean;
+};
+
+/** Drawings and 3D renders look out of place next to stock footage. Testing: a cartoon street came
+ *  back for "village market" despite image_type=photo. */
+const NOT_A_PHOTO = /\b(illustration|cartoon|drawing|vector|clipart|clip art|3d|render|rendering|comic|painting|sketch|icon)\b/i;
+export const isRealPhoto = (h: PhotoHit) =>
+  (h.type ?? "photo") === "photo" && !h.isLowQuality && !NOT_A_PHOTO.test(h.tags);
 
 type VideoFile = { url: string; width: number; height: number; size: number };
 export type VideoHit = {
@@ -39,7 +56,8 @@ export async function fetchPhotos(query: string): Promise<PhotoHit[]> {
     image_type: "photo",
     orientation: "vertical",
     safesearch: "true",
-    per_page: "10",
+    // 30, not 10: most hits fail the tag match, and the pop-up photo check needs choices.
+    per_page: "30",
   }).toString();
   const json = await getJson(url);
   return (json.hits ?? []).map((h: PhotoHit) => ({
@@ -48,6 +66,9 @@ export async function fetchPhotos(query: string): Promise<PhotoHit[]> {
     pageURL: h.pageURL,
     user: h.user,
     tags: h.tags ?? "",
+    webformatURL: h.webformatURL,
+    type: h.type,
+    isLowQuality: h.isLowQuality,
   }));
 }
 
@@ -134,6 +155,22 @@ export function relevance(query: string, tags: string, mode: "strict" | "loose" 
   return matched;
 }
 
+/** Up to `max` pop-up candidates for a search: unused real photos whose tags strictly match, best first. */
+export function photoCandidates(hits: PhotoHit[], query: string, used: Set<number>, max = 6): PhotoHit[] {
+  return hits
+    .filter((h) => !used.has(h.id) && h.webformatURL && isRealPhoto(h) && relevance(query, h.tags) > 0)
+    .sort((a, b) => relevance(query, b.tags) - relevance(query, a.tags))
+    .slice(0, max);
+}
+
+/**
+ * Words of a study's place that make a photo search more specific: the capitalized names in
+ * "250 villages across Afghanistan" -> "afghanistan". Empty when the place has no names.
+ */
+export function placeSearchWords(place: string | undefined): string {
+  return cleanQuery((place ?? "").match(/\b[A-Z][a-zA-Z]+\b/g)?.join(" ") ?? "");
+}
+
 /** Skip the first moment of a clip (often a fade-in or camera settle). */
 const CLIP_LEAD_IN_S = 0.5;
 
@@ -210,7 +247,7 @@ export async function pickShotMedia(
           }
         }
         const photo = photoHits
-          .filter((h) => !usedPhotos.has(h.id) && relevance(query, h.tags, mode) > 0)
+          .filter((h) => !usedPhotos.has(h.id) && isRealPhoto(h) && relevance(query, h.tags, mode) > 0)
           .sort((a, b) => relevance(query, b.tags, mode) - relevance(query, a.tags, mode))[0];
         if (photo) {
           pick = { kind: "image", query, hit: photo };

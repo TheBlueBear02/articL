@@ -128,9 +128,10 @@ function VideoPanel({
   postCaption?: string;
   addonMedia?: AddonMedia | null;
 }) {
-  // Top-half footage plus any Pixabay clips in the split screen's bottom half.
+  // Top-half footage, pop-up photos, and any Pixabay clips in the split screen's bottom half.
   const credits = [
     ...(broll ?? []).map((b) => ({ user: b.user, pageURL: b.pageURL, pixabayId: b.pixabayId })),
+    ...(addonMedia?.popups ?? []).map((p) => ({ user: p.user, pageURL: p.pageURL, pixabayId: p.pixabayId })),
     ...(addonMedia?.bottom ?? [])
       .filter((c) => c.source === "pixabay" && c.user && c.pageURL)
       .map((c) => ({ user: c.user!, pageURL: c.pageURL!, pixabayId: c.pixabayId ?? 0 })),
@@ -280,7 +281,7 @@ function VoiceoverPanel({
                 {s.kind === "beat" && s.pointId && s.pointId === script?.payoffPointId && " · payoff"}
               </span>
               <span>
-                {s.duration.toFixed(1)} s · b-roll: “{s.broll}”
+                {s.duration.toFixed(1)} s · b-roll: “{s.broll}”{s.popup && ` · pop-up: “${s.popup.word}”`}
               </span>
             </div>
             <p className="mt-1 text-sm">{s.text}</p>
@@ -373,6 +374,18 @@ function AddonsPicker({ value, onChange }: { value: Addons; onChange: (a: Addons
             </button>
           );
         })}
+      </div>
+
+      <p className="mt-4 text-sm text-neutral-600 dark:text-neutral-400">
+        Pop-up images (a small photo pops up when something picturable is said)
+      </p>
+      <div className="mt-1 flex flex-wrap gap-2">
+        <button type="button" className={chip(!value.popups, false)} onClick={() => onChange({ ...value, popups: undefined })}>
+          Off
+        </button>
+        <button type="button" className={chip(!!value.popups, false)} onClick={() => onChange({ ...value, popups: true })}>
+          On
+        </button>
       </div>
 
       {value.split === "gameplay" && lib && lib.gameplayClips.length > 0 && (
@@ -501,7 +514,7 @@ export function JobView({ jobId }: { jobId: string }) {
   const [userSelection, setUserSelection] = useState<string[] | null>(null);
   const [saving, setSaving] = useState(false);
   const [showText, setShowText] = useState(false);
-  const [addons, setAddons] = useState<Addons>({});
+  const [addons, setAddons] = useState<Addons>({ popups: true }); // pop-up images are on by default
 
   const settled = job ? SETTLED_STATUSES.includes(job.status) : false;
   const validId = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(jobId);

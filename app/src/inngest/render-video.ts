@@ -4,7 +4,8 @@ import { inngest, VOICE_READY, type VoiceReadyData } from "./client";
 import { supabaseAdmin } from "@/lib/supabase/server";
 import { setJob, MEDIA_BUCKET } from "@/lib/supabase/jobs-db";
 import { searchPhotosCached, searchVideosCached } from "@/lib/pixabay";
-import { downloadMedia, pickShotMedia } from "@/lib/pixabay-api";
+import { cleanQuery, downloadMedia, photoCandidates, pickShotMedia, placeSearchWords, type PhotoHit } from "@/lib/pixabay-api";
+import { pickPhoto } from "@/lib/openai";
 import {
   BOTTOM_LEAD_S,
   buildCompositionHtml,
@@ -14,6 +15,7 @@ import {
   LOOP_LEAD_S,
   planBottomShots,
   planMusic,
+  planPopups,
   planShots,
   withLoopEnding,
   type BottomSource,
@@ -21,7 +23,7 @@ import {
 } from "@/render/composition";
 import { probeDuration, projectDir, readRenderStatus, startRender, VIDEO_FILE, writeProject } from "@/render/local";
 import { downloadLibraryFile, listGameplay, listMusic, pickFor, trackCredit } from "@/lib/library";
-import type { AddonMedia, Addons, BrollImage, Script, Segment } from "@/lib/jobs";
+import type { AddonMedia, Addons, BrollImage, PopupMedia, Script, Segment, StudySetting } from "@/lib/jobs";
 
 /** Split-screen "satisfying" footage: Pixabay searches that tested well (long clips, matching tags). */
 const SATISFYING_QUERIES = ["marble run", "pottery wheel", "skateboarding", "snowboard", "roller coaster", "toy car racing"];
@@ -36,6 +38,69 @@ async function readAddons(jobId: string): Promise<Addons> {
 async function readAddonMedia(jobId: string): Promise<AddonMedia> {
   const { data, error } = await supabaseAdmin().from("jobs").select("addon_media").eq("id", jobId).single();
   return error ? {} : ((data?.addon_media ?? {}) as AddonMedia);
+}
+
+/** At most this many AI photo checks per pop-up (one per search tried). */
+const MAX_PHOTO_CHECKS = 2;
+
+/**
+ * Pop-up photos: time each beat's pop-up word first (so no photo is fetched for a slot that can't
+ * be shown), then search Pixabay, most specific first: the study's place + the search ("afghanistan
+ * village"), the search, the word. Real photos whose tags strictly match go to a vision model,
+ * which picks the one that fits the word and the study's setting, or rejects them all.
+ * Testing (tags only): a Bavarian church for "villages" in Afghanistan, a Christmas scene for
+ * "household income". A pop-up without a good photo is skipped. Never fails the video.
+ */
+async function pickPopups(
+  jobId: string,
+  segments: Segment[],
+  usedPhotos: Set<number>,
+  place: string | undefined,
+): Promise<PopupMedia[]> {
+  const requests = segments.flatMap((s, segment) => (s.kind === "beat" && s.popup ? [{ segment, word: s.popup.word }] : []));
+  const slots = planPopups(buildTimeline(segments), requests);
+  const where = placeSearchWords(place);
+  const out: PopupMedia[] = [];
+  for (const slot of slots) {
+    const seg = segments[slot.segment];
+    const popup = seg.popup!;
+    try {
+      let hit: PhotoHit | undefined;
+      let query = "";
+      let checks = 0;
+      const searches = [where && `${where} ${popup.query}`, popup.query, popup.word].map((q) => cleanQuery(q || ""));
+      for (const q of [...new Set(searches.filter(Boolean))]) {
+        const candidates = photoCandidates(await searchPhotosCached(q), q, usedPhotos);
+        if (!candidates.length) continue;
+        if (checks >= MAX_PHOTO_CHECKS) break;
+        checks++;
+        try {
+          const pick = await pickPhoto({ word: popup.word, sentence: seg.text, place, imageUrls: candidates.map((c) => c.webformatURL!) });
+          console.log(`[render-video] pop-up "${popup.word}" / "${q}": ${pick.index < 0 ? "none fit" : `photo ${pick.index + 1}`} (${pick.reason})`);
+          if (pick.index < 0) continue;
+          hit = candidates[pick.index];
+        } catch (e) {
+          // Without the check, fall back to the best tag match rather than lose the pop-up.
+          console.warn(`[render-video] photo check failed for "${popup.word}": ${e instanceof Error ? e.message : e}`);
+          hit = candidates[0];
+        }
+        query = q;
+        break;
+      }
+      if (!hit) continue;
+      usedPhotos.add(hit.id);
+      const imagePath = `${jobId}/popup-${out.length}.jpg`;
+      const image = await downloadMedia(hit.largeImageURL, "image");
+      const { error } = await supabaseAdmin()
+        .storage.from(MEDIA_BUCKET)
+        .upload(imagePath, image, { contentType: "image/jpeg", upsert: true });
+      if (error) throw new Error(error.message);
+      out.push({ ...slot, side: out.length % 2 === 0 ? "left" : "right", query, imagePath, pixabayId: hit.id, user: hit.user, pageURL: hit.pageURL });
+    } catch (e) {
+      console.warn(`[render-video] pop-up "${popup.word}" skipped for ${jobId}: ${e instanceof Error ? e.message : e}`);
+    }
+  }
+  return out;
 }
 
 const POLL_EVERY = "20s";
@@ -152,13 +217,23 @@ export const renderVideo = inngest.createFunction(
             : [],
         );
       }
-      if (addonMedia.music || addonMedia.bottom?.length) await setJob(jobId, { addon_media: addonMedia });
+      if (addons.popups) {
+        const usedPhotos = new Set(picks.filter((p) => p.kind === "image").map((p) => p.hit.id));
+        // The study's place makes searches and the photo check specific (column from migration 0007).
+        const { data: s } = await supabaseAdmin().from("jobs").select("study_setting").eq("id", jobId).single();
+        const place = (s?.study_setting as StudySetting | null)?.place?.value;
+        addonMedia.popups = await pickPopups(jobId, segments, usedPhotos, place);
+      }
+      if (addonMedia.music || addonMedia.bottom?.length || addonMedia.popups?.length) {
+        await setJob(jobId, { addon_media: addonMedia });
+      }
 
       return {
         shots: broll.length,
         videos: broll.filter((b) => b.kind === "video").length,
         music: addonMedia.music?.path ?? null,
         bottom: addonMedia.bottom?.length ?? 0,
+        popups: addonMedia.popups?.map((p) => `${p.word} @ ${p.start}s (${p.query})`) ?? [],
       };
     });
 
@@ -241,11 +316,20 @@ export const renderVideo = inngest.createFunction(
           )
         : undefined;
 
+      // Pop-up photos (times were planned and saved in fetch-broll).
+      const popups: NonNullable<CompositionExtras["popups"]> = [];
+      for (const [i, p] of (addonMedia.popups ?? []).entries()) {
+        const file = `assets/popup-${i}.jpg`;
+        extraFiles.push({ path: file, content: await download(p.imagePath) });
+        popups.push({ file, start: p.start, end: p.end, side: p.side, place: p.place });
+      }
+
       const html = buildCompositionHtml(timeline, withMedia, {
         hookTitle: script?.hookTitle,
         credit: script?.sourceCredit,
         bottom,
         music,
+        popups,
       });
 
       const dir = await writeProject(jobId, [
@@ -262,6 +346,7 @@ export const renderVideo = inngest.createFunction(
         shots: shots.length,
         music: !!music,
         bottomShots: bottom?.length ?? 0,
+        popups: popups.length,
       };
     });
 

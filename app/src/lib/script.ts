@@ -30,7 +30,7 @@ Write these fields:
   counter-intuitive claim. Never a question, and no filler like "the answer might surprise you".
   Tease the payoff point without revealing its result.
 - hookTitle: the hook as on-screen text, at most 7 words, no final punctuation.
-- beats: one per chosen point, 1-3 sentences each, ordered as a story with the payoff point last.
+- beats: exactly one per chosen point (pointId is that point's id; no extra beats), 1-3 sentences each, ordered as a story with the payoff point last.
   The first beat opens with where, when and with whom the study was done (only what STUDY SETTING
   gives), then its point; there is no separate setting beat. Start one middle beat with a short
   re-hook such as "But here's the strange part".
@@ -43,6 +43,11 @@ Write these fields:
   title or opening; "" if not given.
 - postCaption: 1-2 sentences on the main finding, a line asking viewers to share or comment,
   then a line of 3 to 5 hashtags.
+- popup (each beat): a thing the beat's text literally says that you could photograph, popped up
+  on screen as it is spoken. "word": 1-3 words copied exactly as written in that beat; "query": a
+  1-3 word photo search for it. Good: "villages", "ballot box", "female elites", "headmen's houses",
+  "stock market". Bad: "45 percent" (a number), "strange part" (not a thing), "women" when the beat
+  says "female elites" (not the beat's words). If the beat names nothing photographable, "" for both.
 - broll and shots for the hook, each beat and the closing: broll is 2-4 words for the topic;
   shots are 3 visually different stock-video searches of at most 3 concrete, filmable words
   (e.g. "voting booth", "coins"). No abstract ideas, arrows or icons.
@@ -53,8 +58,8 @@ Rules (checked automatically):
   Apostrophes are fine and needed: "headmen's houses", "don't".
 - If a 12-year-old wouldn't know a word (e.g. "randomized", "referenda", "socioeconomic",
   "market exposure"), say it in everyday words instead.
-- Use only facts and numbers from the chosen points and STUDY SETTING. Never round or change a
-  number; "percentage points" are not "percent".
+- Use only facts and numbers from the chosen points and STUDY SETTING. Never round, change or
+  convert a number ("1 in 8" stays "1 in 8", not "12.5 percent"); "percentage points" are not "percent".
 - Never mention the video itself ("in this video", "at the end", "payoff", "loop", field names).
 - Use {MIN_WORDS} to {MAX_WORDS} words across hook, beats and closing.`;
 
@@ -89,8 +94,19 @@ const SCHEMA = {
       items: {
         type: "object",
         additionalProperties: false,
-        required: ["pointId", "text", "broll", "shots"],
-        properties: { pointId: { type: "string" }, text: { type: "string" }, broll: { type: "string" }, shots: SHOTS },
+        required: ["pointId", "text", "broll", "shots", "popup"],
+        properties: {
+          pointId: { type: "string" },
+          text: { type: "string" },
+          broll: { type: "string" },
+          shots: SHOTS,
+          popup: {
+            type: "object",
+            additionalProperties: false,
+            required: ["word", "query"],
+            properties: { word: { type: "string" }, query: { type: "string" } },
+          },
+        },
       },
     },
     closing: { type: "string" },

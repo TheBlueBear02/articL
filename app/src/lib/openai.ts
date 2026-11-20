@@ -87,7 +87,15 @@ export async function chatJson<T>(opts: {
   user: string;
   schemaName: string;
   schema: object;
+  /** Image URLs shown to the model after the text (low detail: ~85 tokens each). */
+  images?: string[];
 }): Promise<{ data: T; model: string; usage: Usage }> {
+  const userContent = opts.images?.length
+    ? [
+        { type: "text", text: opts.user },
+        ...opts.images.map((url) => ({ type: "image_url", image_url: { url, detail: "low" } })),
+      ]
+    : opts.user;
   const model = process.env.OPENAI_MODEL || DEFAULT_MODEL;
   const res = await fetch("https://api.openai.com/v1/chat/completions", {
     method: "POST",
@@ -97,7 +105,7 @@ export async function chatJson<T>(opts: {
       reasoning_effort: "minimal", // fewest billed reasoning tokens
       messages: [
         { role: "system", content: opts.system },
-        { role: "user", content: opts.user },
+        { role: "user", content: userContent },
       ],
       response_format: {
         type: "json_schema",
@@ -129,4 +137,74 @@ export async function proposePoints(articleText: string): Promise<ProposeResult>
     schema: SCHEMA,
   });
   return { points: data.points ?? [], setting: data.setting ?? {}, model, usage };
+}
+
+const PICK_PHOTO_PROMPT = `You choose a stock photo for a short educational video about a research study.
+A small photo pops up on screen while the narrator says a word. You see numbered candidate photos.
+Pick the one that best shows that word as it is meant in the sentence, in a setting that fits the study.
+
+The photo does NOT have to show the study's country: a neutral photo (a dirt road, a ballot box, hands
+holding money, a simple house) is fine. Reject a photo (answer 0 if all are rejected) only when it:
+- clearly shows a different part of the world (e.g. Alpine chalets, a Swiss flag or a European church
+  for villages in Afghanistan),
+- shows the word in a different situation than the sentence and study describe (e.g. a corporate
+  office meeting for village meetings in Afghanistan, a modern city for a rural study),
+- is about something else that only shares a tag (holidays, pets, food, unrelated people),
+- is a drawing, cartoon, 3D render or mostly text,
+- could mislead a viewer about the study.
+A plain, clear photo that fits is better than a striking one that doesn't.`;
+
+// Judge every photo before choosing. Testing: asked only for "the best one", the model picked a
+// corporate office meeting for village meetings in Afghanistan, as the best of a poor set.
+const PICK_PHOTO_SCHEMA = {
+  type: "object",
+  additionalProperties: false,
+  required: ["photos", "choice", "reason"],
+  properties: {
+    photos: {
+      type: "array",
+      items: {
+        type: "object",
+        additionalProperties: false,
+        required: ["number", "shows", "fits"],
+        properties: {
+          number: { type: "integer" },
+          shows: { type: "string" },
+          fits: { type: "boolean" },
+        },
+      },
+    },
+    choice: { type: "integer" },
+    reason: { type: "string" },
+  },
+};
+
+/**
+ * Ask a vision model which candidate photo fits a pop-up word, or none.
+ * Returns the 0-based index into `imageUrls`, or -1 when none fits.
+ */
+export async function pickPhoto(opts: {
+  word: string;
+  sentence: string;
+  place?: string;
+  imageUrls: string[];
+}): Promise<{ index: number; reason: string; usage: Usage }> {
+  const { data, usage } = await chatJson<{ photos: { number: number; shows: string; fits: boolean }[]; choice: number; reason: string }>({
+    system: PICK_PHOTO_PROMPT,
+    user:
+      `WORD: ${opts.word}\nSENTENCE: ${opts.sentence}\nWHERE THE STUDY TOOK PLACE: ${opts.place || "not stated"}\n` +
+      `There are ${opts.imageUrls.length} photos, numbered 1 to ${opts.imageUrls.length} in the order shown. ` +
+      `First, for EACH photo: "shows" = what and where it shows in a few words, "fits" = true only if ` +
+      `none of the reject rules apply. Then "choice" = the number of the best photo that fits, or 0 if ` +
+      `none fits, and a short "reason".`,
+    schemaName: "photo_pick",
+    schema: PICK_PHOTO_SCHEMA,
+    images: opts.imageUrls,
+  });
+  const n = Math.round(data.choice);
+  // Only accept a choice the model itself judged as fitting.
+  const fits = data.photos?.some((p) => p.number === n && p.fits);
+  const index = fits && n >= 1 && n <= opts.imageUrls.length ? n - 1 : -1;
+  const verdicts = (data.photos ?? []).map((p) => `${p.number}${p.fits ? "+" : "-"} ${p.shows}`).join("; ");
+  return { index, reason: `${data.reason ?? ""} [${verdicts}]`, usage };
 }

@@ -55,11 +55,19 @@ export type SettingFact = { value: string; evidence: string };
  *  A fact is missing when the article doesn't state it or its evidence couldn't be verified. */
 export type StudySetting = { place?: SettingFact; period?: SettingFact; sample?: SettingFact };
 
+/** A picturable word in a beat, shown as a small pop-up photo when it is spoken. */
+export type Popup = {
+  /** Copied from the beat's spoken text, 1-3 words ("ballot box"). */
+  word: string;
+  /** 1-3 word Pixabay photo search for it. */
+  query: string;
+};
+
 export type Script = {
   hook: string;
   hookBroll: string;
   hookShots?: string[];
-  beats: { pointId: string; text: string; broll: string; shots?: string[] }[];
+  beats: { pointId: string; text: string; broll: string; shots?: string[]; popup?: Popup }[];
   closing: string;
   closingBroll: string;
   closingShots?: string[];
@@ -84,6 +92,8 @@ export type Segment = {
   broll: string;
   /** 1-3 word stock-footage searches, one per shot (older jobs don't have these). */
   shots?: string[];
+  /** Beats only: the word to show a pop-up photo for (older jobs don't have it). */
+  popup?: Popup;
   /** Path inside the private "media" bucket. */
   audioPath: string;
   duration: number;
@@ -100,6 +110,26 @@ export type Addons = {
   split?: SplitStyle;
   /** With split "gameplay": the library clip to use (path in the "library" bucket); omitted = pick one. */
   gameplayClip?: string;
+  /** Small photos that pop up when a picturable word is spoken (on by default in the picker). */
+  popups?: boolean;
+};
+
+/** A pop-up photo picked for a beat, with its time on the film and its Pixabay credit. */
+export type PopupMedia = {
+  segment: number;
+  word: string;
+  query: string;
+  start: number;
+  end: number;
+  /** Which side of the screen it leans to; alternates so consecutive pop-ups don't look the same. */
+  side: "left" | "right";
+  /** "high" above the captions, or "low" below them while a number callout holds the upper band. */
+  place?: "high" | "low";
+  /** Path inside the private "media" bucket. */
+  imagePath: string;
+  pixabayId: number;
+  user: string;
+  pageURL: string;
 };
 
 /** One clip in the split screen's bottom half. */
@@ -122,6 +152,7 @@ export type BottomClip = {
 export type AddonMedia = {
   music?: { path: string; title: string; artist?: string };
   bottom?: BottomClip[];
+  popups?: PopupMedia[];
 };
 
 /** What the library has, for the add-on choices on the points screen. */

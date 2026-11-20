@@ -20,9 +20,9 @@ async function cached<T>(key: string, fetcher: () => Promise<T[]>): Promise<T[]>
 }
 
 // Cache keys are prefixed so photo and video results for the same words don't collide
-// (and so old Phase 4 photo-only entries, which lack tags, aren't reused).
+// (and so older entries, which lack tags or the type/preview fields, aren't reused).
 export const searchPhotosCached = (q: string): Promise<PhotoHit[]> =>
-  cached(`photos2:${cleanQuery(q)}`, () => fetchPhotos(cleanQuery(q)));
+  cached(`photos4:${cleanQuery(q)}`, () => fetchPhotos(cleanQuery(q)));
 
 export const searchVideosCached = (q: string): Promise<VideoHit[]> =>
   cached(`videos:${cleanQuery(q)}`, () => fetchVideos(cleanQuery(q)));

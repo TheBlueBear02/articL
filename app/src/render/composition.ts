@@ -30,6 +30,13 @@ const MAX_SHOTS_PER_SEGMENT = 4;
 export const FADE_S = 0.35;
 /** How long a number callout stays up after the number is spoken. */
 const CALLOUT_HOLD_S = 3.0;
+/** Pop-up photos: on screen this long, starting just before their word, with this much air between them. */
+const POPUP_S = 1.8;
+const POPUP_MIN_S = 1.2;
+const POPUP_LEAD_S = 0.1;
+const POPUP_GAP_S = 1.0;
+/** A pop-up may start this much after its word, to wait for a callout or the title to clear. */
+const POPUP_MAX_DELAY_S = 0.6;
 
 export type TimelineSegment = {
   index: number;
@@ -148,6 +155,76 @@ export function findCallouts(timeline: Timeline): Callout[] {
       start: w[i].start,
       end: round(Math.min(segEnd, w[i].start + CALLOUT_HOLD_S)),
     });
+  }
+  return out;
+}
+
+/** When the hook title leaves the screen (it's back for the last TITLE_RETURN_S of the film). */
+function titleOffAt(timeline: Timeline): number {
+  const hook = timeline.segments.find((s) => s.kind === "hook");
+  return round(Math.min(TITLE_HOLD_S, hook ? hook.start + hook.length : TITLE_HOLD_S, timeline.duration / 2));
+}
+
+export type PopupRequest = { segment: number; word: string };
+/** "high": the band above the captions; "low": a smaller card below them, used while a number callout is up. */
+export type PopupPlace = "high" | "low";
+export type PopupSlot = PopupRequest & { start: number; end: number; side: "left" | "right"; place: PopupPlace };
+
+const plainWord = (s: string) => s.toLowerCase().replace(/[’']/g, "'").replace(/[^a-z0-9']+/g, "");
+
+/**
+ * When and where each pop-up photo shows: from just before its word is spoken, for POPUP_S.
+ * It goes in the band above the captions ("high"), which it shares with the hook title and the
+ * number callouts. If a callout is up, it moves below the captions ("low") instead. It may wait
+ * briefly for the title to clear, never runs into the loop seconds at the end, and keeps a gap from
+ * the previous pop-up. Requests whose word can't be found in the timed words are skipped.
+ */
+export function planPopups(timeline: Timeline, requests: PopupRequest[]): PopupSlot[] {
+  const D = timeline.duration;
+  const always: [number, number][] = [
+    [0, titleOffAt(timeline) + 0.3],
+    [D - LOOP_LEAD_S - 0.3, D],
+  ];
+  const callouts = findCallouts(timeline).map((c): [number, number] => [c.start - 0.2, c.end + 0.2]);
+  const out: PopupSlot[] = [];
+
+  // Earliest start at or after `from` that keeps POPUP_MIN_S clear of the blocks, and its end.
+  const fit = (from: number, segEnd: number, blocked: [number, number][]) => {
+    let start = from;
+    for (let moved = true; moved; ) {
+      moved = false;
+      for (const [a, b] of blocked) {
+        if (start < b && start + POPUP_MIN_S > a) {
+          start = b;
+          moved = true;
+        }
+      }
+    }
+    // End early rather than run into something that starts later in the beat.
+    const nextBlock = Math.min(...blocked.map(([a]) => a).filter((a) => a >= start));
+    return { start, end: Math.min(start + POPUP_S, segEnd, nextBlock) };
+  };
+
+  for (const req of [...requests].sort((a, b) => a.segment - b.segment)) {
+    const seg = timeline.segments[req.segment];
+    if (!seg) continue;
+    const want = req.word.split(/\s+/).map(plainWord).filter(Boolean);
+    const words = seg.words.map((w) => plainWord(w.word));
+    const at = words.findIndex((_, i) => want.every((x, k) => words[i + k] === x));
+    if (!want.length || at < 0) continue;
+
+    const wordStart = Math.max(seg.start, seg.words[at].start - POPUP_LEAD_S);
+    const from = Math.max(wordStart, out.length ? out[out.length - 1].end + POPUP_GAP_S : 0);
+    const segEnd = seg.start + seg.length;
+    const ok = (s: { start: number; end: number }) => s.start - wordStart <= POPUP_MAX_DELAY_S && s.end - s.start >= POPUP_MIN_S;
+    let place: PopupPlace = "high";
+    let slot = fit(from, segEnd, [...always, ...callouts]);
+    if (!ok(slot)) {
+      place = "low";
+      slot = fit(from, segEnd, always);
+    }
+    if (!ok(slot)) continue;
+    out.push({ ...req, start: round(slot.start), end: round(slot.end), side: out.length % 2 === 0 ? "left" : "right", place });
   }
   return out;
 }
@@ -300,6 +377,8 @@ export type CompositionExtras = {
   bottom?: ShotWithMedia[];
   /** Background music file (relative to the project) and its pieces (from planMusic). */
   music?: { file: string; clips: MusicClip[] };
+  /** Pop-up photos (file relative to the project) with their slots from planPopups. */
+  popups?: { file: string; start: number; end: number; side: "left" | "right"; place?: PopupPlace }[];
 };
 
 /** JSON that is safe to inline inside a <script> tag. */
@@ -335,8 +414,16 @@ export function buildCompositionHtml(
         `      <audio id="music-${i}" src="${extras.music!.file}" data-start="${c.start}" data-duration="${c.duration}" data-media-start="${c.mediaStart}" data-volume="${MUSIC_VOLUME}"${c.fadeIn ? ` data-fade-in="${c.fadeIn}"` : ""}${c.fadeOut ? ` data-fade-out="${c.fadeOut}"` : ""} data-track-index="${11 + i}"></audio>`,
     )
     .join("\n");
-  const hook = timeline.segments.find((s) => s.kind === "hook");
-  const titleOff = round(Math.min(TITLE_HOLD_S, hook ? hook.start + hook.length : TITLE_HOLD_S, D / 2));
+  const titleOff = titleOffAt(timeline);
+
+  // Pop-up photos: timed image clips inside untimed wrappers that carry the pop animation.
+  const popups = extras.popups ?? [];
+  const popupHtml = popups
+    .map(
+      (p, i) =>
+        `      <div id="p${i}" class="popup popup-${p.side} popup-${p.place ?? "high"}"><img id="pm${i}" class="clip media" src="${p.file}" alt="" data-start="${p.start}" data-duration="${round(p.end - p.start)}" data-track-index="${20 + (i % 2)}" /></div>`,
+    )
+    .join("\n");
 
   const shotHtml = shots
     .map((s, g) => {
@@ -369,6 +456,7 @@ export function buildCompositionHtml(
     titleOff,
     titleBack: round(D - TITLE_RETURN_S),
     credit: extras.credit?.trim() || null,
+    popups: popups.map((p) => ({ start: p.start, end: p.end, tilt: p.side === "left" ? -4 : 4 })),
   };
 
   return `<!doctype html>
@@ -436,6 +524,17 @@ export function buildCompositionHtml(
         text-transform: uppercase; text-align: center; letter-spacing: -0.02em; padding: 26px 38px 30px;
         border-radius: 26px; border-bottom: 10px solid var(--accent); box-shadow: 0 18px 50px rgba(0,0,0,0.4);
       }
+      /* Pop-up photos: a tilted card in the band above the captions (inside the top half on split screen). */
+      .popup {
+        position: absolute; z-index: 950; top: 350px; width: 420px; height: 420px; overflow: hidden;
+        border: 12px solid #fff; border-radius: 30px; background: #fff; opacity: 0;
+        box-shadow: 0 22px 60px rgba(0,0,0,0.55); transform-origin: 50% 60%;
+      }
+      .popup .media { border-radius: 18px; }
+      .popup-left { left: 130px; }
+      .popup-right { right: 130px; }
+      /* While a number callout holds the upper band: a smaller card under the captions, above the Reels UI. */
+      .popup-low { top: 1195px; width: 320px; height: 320px; border-width: 10px; }
       /* Source credit, just under Instagram's top UI zone. */
       #creditline { position: absolute; z-index: 1001; left: 140px; right: 140px; top: 250px; height: 60px; }
       .credit {
@@ -448,7 +547,7 @@ export function buildCompositionHtml(
     <div id="root"${split ? ' class="split"' : ""} data-composition-id="main" data-start="0" data-duration="${D}" data-width="1080" data-height="1920">
 ${shotHtml}
 ${bottomHtml}${split ? `\n      <div id="divider"></div>` : ""}
-      <div id="scrim" class="clip" data-start="0" data-duration="${D}" data-track-index="4"></div>
+      <div id="scrim" class="clip" data-start="0" data-duration="${D}" data-track-index="4"></div>${popupHtml ? `\n${popupHtml}` : ""}
       <div id="callouts" class="clip" data-start="0" data-duration="${D}" data-track-index="5"></div>
       <div id="captions" class="clip" data-start="0" data-duration="${D}" data-track-index="6"></div>
       <div id="titlecard" class="clip" data-start="0" data-duration="${D}" data-track-index="7"></div>
@@ -553,6 +652,15 @@ ${musicHtml}
         tl.set(el, { visibility: "visible" }, c.start);
         tl.fromTo(num, { scale: 0.5, rotation: -4 }, { scale: 1, rotation: 0, duration: 0.35, ease: "back.out(2.2)" }, c.start);
         tl.set(el, { visibility: "hidden" }, c.end);
+      });
+
+      // ---- Pop-up photos: bounce in tilted, drift up a little, shrink away ----
+      DATA.popups.forEach((p, i) => {
+        const w = "#p" + i;
+        const out = Math.max(p.start + 0.4, p.end - 0.22);
+        tl.fromTo(w, { opacity: 0, scale: 0.3, rotation: p.tilt * 3 }, { opacity: 1, scale: 1, rotation: p.tilt, duration: 0.35, ease: "back.out(2)" }, p.start);
+        tl.fromTo(w, { y: 0 }, { y: -16, duration: p.end - p.start, ease: "none" }, p.start);
+        tl.fromTo(w, { opacity: 1, scale: 1 }, { opacity: 0, scale: 0.7, duration: p.end - out, ease: "power1.in", immediateRender: false }, out);
       });
 
       window.__timelines = window.__timelines || {};

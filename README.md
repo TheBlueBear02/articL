@@ -10,7 +10,8 @@ Turns an article PDF into a short, Reels-style vertical video. The user picks th
 - **Pasted text:** besides uploading a PDF, you can paste article text, with an optional title, in the "Paste text" tab (40–30,000 words). It joins the same pipeline from the points step on. Pasted-text jobs have an empty `file_path`.
 - **Job pages + My videos:** every job has its own page (`/jobs/<id>`) that survives a refresh and can be bookmarked. The home page lists the 20 most recent jobs with their status. Finished videos are stored in the private `media` bucket at `<jobId>/video.mp4`.
 - **Reel structure (from `product-documents/Short-Video-Structure-Research.md`):** the script opens with a proven hook formula and an on-screen hook title, teases the strongest point (the "payoff") and saves it for the last beat, re-hooks halfway, and ends on a line that runs into the hook. The video ends on the first shot's media, timed to land on the opening frame, so the replay loops seamlessly (no freeze or end card). A source credit ("Surname & Surname, 2021") stays on screen if the names and year are found in the article. A post caption with a share prompt and hashtags is shown under the video, ready to copy.
-- **Add-ons:** chosen on the points screen, both off by default.
+- **Add-ons:** chosen on the points screen. Pop-up images are on by default; music and split screen are off.
+  - **Pop-up images:** the script picks one picturable word per beat ("ballot box"). A small tilted photo card pops up as that word is spoken, in the band above the captions, for about 1.8 s. It waits briefly for a number callout or the hook title to clear, or is skipped, and it stays out of the loop seconds at the end. The photo comes from Pixabay, searched most specific first: the study's place plus the search ("afghanistan village"), then the search, then the word. Real photos whose tags strictly match (no illustrations or low-quality images) go to a vision model (`OPENAI_MODEL`, low detail, ~6 photos per check, at most 2 checks per pop-up). It picks the one that fits the word and doesn't clearly show a different part of the world, or rejects them all. A pop-up with no good photo is left out rather than showing something off-topic.
   - **Background music:** Calm / Upbeat / Dramatic. Tracks come from `library/music/<mood>/` and play at about -18 dB under the voice. The music's tail is timed so it loops with the video.
   - **Split screen:** the story footage takes the top half. The bottom half shows **gameplay** from `library/gameplay/` (your own recordings, played continuously) or **satisfying clips** from Pixabay (marble run, pottery wheel, skateboarding and similar, cut every ~12 s). The bottom half loops seamlessly too.
   - Choices with no files in the library are greyed out.
@@ -74,6 +75,7 @@ Slips with one right answer are fixed automatically instead of rewritten:
 - "referenda" → "referendums";
 - a missing apostrophe ("headmen s" → "headmen's");
 - a separate setting beat merged into the first beat;
+- a beat's pop-up dropped if its word isn't said in that beat, contains a number, or is over 3 words;
 - the payoff beat moved to the end.
 
 The source credit is never a reason to rewrite. If its surnames aren't in the first lines of the article, it is left out. The year always comes from the article's own publication line, never from the model.
