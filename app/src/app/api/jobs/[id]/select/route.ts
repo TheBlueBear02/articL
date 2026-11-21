@@ -4,8 +4,8 @@ import { parseAddons } from "@/lib/addons-input";
 import { POINTS_SELECTED } from "@/inngest/client";
 import { sendJobEvent } from "@/inngest/send";
 
-// Save chosen points (1 to 5) and start Phase 3. New jobs auto-select after proposing;
-// this route remains so any job still stuck on awaiting_selection can continue.
+// Save chosen points (1 to 5) + add-ons and start Phase 3. Points are auto-recommended;
+// this is the user submit step that confirms add-ons and continues.
 export async function POST(request: Request, ctx: RouteContext<"/api/jobs/[id]/select">) {
   const { id } = await ctx.params;
   const body = await request.json().catch(() => null);

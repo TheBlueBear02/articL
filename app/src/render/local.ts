@@ -96,6 +96,28 @@ export async function probeDuration(content: Buffer, ext: string): Promise<numbe
   }
 }
 
+/**
+ * A small JPEG thumbnail of a finished video: the frame at 1 s (the hook title over the opening
+ * shot), 360x640, ~20-40 KB, for the home page carousel. Uses FFmpeg, which local renders need anyway.
+ */
+export async function extractThumbnail(videoPath: string): Promise<Buffer> {
+  const out = path.join(tmpdir(), `articl-thumb-${process.pid}-${Date.now()}.jpg`);
+  try {
+    await new Promise<void>((resolve, reject) => {
+      const p = spawn("ffmpeg", ["-loglevel", "error", "-y", "-ss", "1", "-i", videoPath, "-frames:v", "1", "-vf", "scale=360:640", "-q:v", "5", out], {
+        windowsHide: true,
+      });
+      let stderr = "";
+      p.stderr.on("data", (d) => (stderr += d));
+      p.on("error", reject);
+      p.on("close", (code) => (code === 0 ? resolve() : reject(new Error(`ffmpeg thumbnail failed: ${stderr.trim()}`))));
+    });
+    return await readFile(out);
+  } finally {
+    await rm(out, { force: true });
+  }
+}
+
 export type RenderStatus ={ done: boolean; exitCode: number | null; progress: number; logTail: string };
 
 /** Read progress from HyperFrames' "@hf-progress {...pct...}" lines and the exit file. */

@@ -15,8 +15,7 @@ export type JobStatus =
   | "failed";
 
 // Statuses after which the job won't change again without user action.
-// (awaiting_selection is no longer a pause — points are auto-chosen — but old rows may still have it.)
-export const SETTLED_STATUSES: JobStatus[] = ["rendered", "failed"];
+export const SETTLED_STATUSES: JobStatus[] = ["awaiting_selection", "rendered", "failed"];
 
 /** Short labels for the job page and My videos list. */
 export const STATUS_LABEL: Record<JobStatus, string> = {
@@ -25,7 +24,7 @@ export const STATUS_LABEL: Record<JobStatus, string> = {
   extracting: "Extracting text…",
   extracted: "Text extracted",
   proposing: "Finding key points…",
-  awaiting_selection: "Choosing points…",
+  awaiting_selection: "Confirm add-ons",
   points_selected: "Points saved",
   scripting: "Writing the script…",
   voicing: "Recording the voiceover…",
@@ -107,11 +106,25 @@ export type Popup = {
   query: string;
 };
 
+/** Chart kinds: "bars" compares 2-3 groups, "change" shows one measure at 2 times, "share" is one
+ *  percentage of a whole (a 10x10 grid). */
+export const CHART_KINDS = ["bars", "change", "share"] as const;
+export type ChartKind = (typeof CHART_KINDS)[number];
+/** An on-screen chart for a beat. Every value and label is checked against the point's source
+ *  sentence (cleanChart), and every value must be spoken in the beat, so it can appear on its word. */
+export type Chart = {
+  kind: ChartKind;
+  /** label: 1-4 words from the source sentence ("women", "2007"); value: digits as written there ("31.2"). */
+  items: { label: string; value: string }[];
+  /** "percent", "percentage points", 1-2 words from the source ("rupees"), or "". */
+  unit: string;
+};
+
 export type Script = {
   hook: string;
   hookBroll: string;
   hookShots?: string[];
-  beats: { pointId: string; text: string; broll: string; shots?: string[]; popup?: Popup }[];
+  beats: { pointId: string; text: string; broll: string; shots?: string[]; popup?: Popup; chart?: Chart }[];
   closing: string;
   closingBroll: string;
   closingShots?: string[];
@@ -140,6 +153,8 @@ export type Segment = {
   popup?: Popup;
   /** Student videos: the on-screen section label ("THE QUESTION"). */
   section?: string;
+  /** Beats only: a checked chart of the beat's numbers (replaces its big-number callout). */
+  chart?: Chart;
   /** Path inside the private "media" bucket. */
   audioPath: string;
   duration: number;
@@ -162,6 +177,8 @@ export type Addons = {
   sfx?: boolean;
   /** A map zooming into the study's country in the first beat (on by default; needs a known country). */
   map?: boolean;
+  /** Animated charts for beats that compare numbers (on by default; others keep the big number). */
+  charts?: boolean;
   /** Where the video renders: "local" (this computer, free) or "cloud" (HeyGen, paid per minute).
    *  Missing = the server's default (RENDER_MODE in .env, else local). */
   render?: RenderTarget;
@@ -170,8 +187,8 @@ export type Addons = {
 export const RENDER_TARGETS = ["local", "cloud"] as const;
 export type RenderTarget = (typeof RENDER_TARGETS)[number];
 
-/** Pop-ups, sound effects and map start on; music and split stay off until chosen. */
-export const DEFAULT_ADDONS: Addons = { popups: true, sfx: true, map: true };
+/** Pop-ups, sound effects, map and charts start on; music and split stay off until chosen. */
+export const DEFAULT_ADDONS: Addons = { popups: true, sfx: true, map: true, charts: true };
 
 /** Fill in default on/off flags when a job has no saved add-ons (or only music/split). */
 export function resolveAddons(raw?: Addons | null): Addons {

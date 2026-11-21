@@ -1,5 +1,5 @@
 // Phase 3 script checks. Pure (type-only imports), so they can be tested with plain node.
-import type { Audience, CandidatePoint, PointType, Popup, Script, StudySetting } from "./jobs";
+import type { Audience, CandidatePoint, Chart, PointType, Popup, Script, StudySetting } from "./jobs";
 
 /** ~150 words is ~55 s at TTS speed 1.1 (measured: the spike's 20 words took 5.97 s). */
 export const DEFAULT_MAX_WORDS = 150;
@@ -344,7 +344,12 @@ export function autoFixScript(
       const text = fix(`Beat ${b.pointId}`, b.text);
       const popup = cleanPopup(b.popup, text);
       if (b.popup?.word && !popup) fixes.push(`Beat ${b.pointId}: dropped pop-up "${b.popup.word}"`);
-      return { ...b, text, popup };
+      const point = points.find((p) => p.id === b.pointId);
+      const checked = point ? checkChart(b.chart, point.evidence, text) : { problem: "no point" };
+      if ("problem" in checked && b.chart && (b.chart.kind as string) !== "none") {
+        fixes.push(`Beat ${b.pointId}: dropped ${b.chart.kind} chart (${checked.problem})`);
+      }
+      return { ...b, text, popup, chart: "chart" in checked ? checked.chart : undefined };
     }),
     closing: fix("Closing", script.closing),
     hookTitle: script.hookTitle === undefined ? undefined : fix("Hook title", script.hookTitle, true),
@@ -391,6 +396,62 @@ export function cleanPopup(popup: Popup | undefined, beatText: string): Popup | 
     if (hit) return { word: hit, query };
   }
   return undefined;
+}
+
+// Label words that needn't be in the source sentence ("the control group" vs "control group").
+const LABEL_FILLER = new Set("a an the of in on at to for and or with by from group groups".split(" "));
+// Time words a "change" chart may use for its two sides without the source saying them.
+const CHANGE_LABELS = new Set(["before", "after", "then", "now", "start", "end"]);
+const CHART_SIZES: Record<Chart["kind"], [number, number]> = { bars: [2, 3], change: [2, 2], share: [1, 1] };
+
+/**
+ * Keep a beat's chart only if everything on it comes from the point's source sentence: each value
+ * is a number written there (same digits, no rounding), each label's words are there, the unit is
+ * there, and the beat says each value (so it can appear on its word). Charts never cause a rewrite:
+ * a failed one is dropped and the beat keeps its plain big-number callout.
+ */
+export function checkChart(
+  chart: Chart | undefined,
+  evidence: string,
+  beatText: string,
+): { chart: Chart } | { problem: string } {
+  if (!chart || !(chart.kind in CHART_SIZES)) return { problem: "none" };
+  const [min, max] = CHART_SIZES[chart.kind];
+  const items = (chart.items ?? []).map((i) => ({
+    label: plainWords(i.label ?? "").split(" ").slice(0, 4).join(" "),
+    value: String(i.value ?? "").replace(/[,%\s]/g, ""),
+  }));
+  if (items.length < min || items.length > max) return { problem: `${items.length} items` };
+  const sourceNums = new Set(numbersIn(evidence));
+  const saidNums = new Set(numbersIn(beatText));
+  // Word stems, so a label's "obtained" matches the source's "obtain" (testing: Bertrand).
+  const stem = (w: string) => singular(w).replace(/(ing|ed|d)$/, "");
+  const sourceWords = plainWords(evidence).split(" ").map(stem);
+  const unit = plainWords(chart.unit ?? "");
+  for (const it of items) {
+    if (!/^\d+(\.\d+)?$/.test(it.value)) return { problem: `value "${it.value}" is not a number` };
+    if (/^(19|20)\d{2}$/.test(it.value)) return { problem: `value ${it.value} is a year` }; // years are labels, not bars
+    if (!sourceNums.has(it.value)) return { problem: `${it.value} is not in the source sentence` };
+    if (!saidNums.has(it.value)) return { problem: `${it.value} is not said in the beat` };
+    const words = it.label.split(" ").filter((w) => w && !LABEL_FILLER.has(w));
+    if (chart.kind !== "share" && !words.length) return { problem: "empty label" };
+    const generic = (w: string) => chart.kind === "change" && CHANGE_LABELS.has(w);
+    const missing = words.find((w) => !sourceWords.includes(stem(w)) && !sourceNums.has(w) && !generic(w));
+    if (missing) return { problem: `label word "${missing}" is not in the source sentence` };
+  }
+  if (new Set(items.map((i) => i.value + "|" + i.label)).size < items.length) return { problem: "repeated item" };
+  if (unit === "percent") {
+    if (!items.every((it) => asPercent(it.value).test(evidence.replace(/,(?=\d{3}\b)/g, "")))) return { problem: "not percent in the source" };
+    if (items.some((it) => Number(it.value) > 100)) return { problem: "percent over 100" };
+  } else if (unit === "percentage points") {
+    if (!/percentage[- ]points?|\bp\.?p\b/i.test(evidence)) return { problem: "not percentage points in the source" };
+  } else if (unit) {
+    if (countWords(unit) > 2) return { problem: "unit too long" };
+    const missing = unit.split(" ").find((w) => !sourceWords.includes(stem(w)));
+    if (missing) return { problem: `unit "${unit}" is not in the source sentence` };
+  }
+  if (chart.kind === "share" && unit !== "percent") return { problem: "share needs a percent" };
+  return { chart: { kind: chart.kind, items, unit } };
 }
 
 /** Problems that only affect optional extras: the video can still be made without those fields. */
@@ -591,6 +652,7 @@ export function scriptSegments(script: Script) {
       broll: b.broll,
       shots: b.shots,
       popup: b.popup,
+      chart: b.chart,
     })),
     { kind: "closing" as const, text: script.closing, broll: script.closingBroll, shots: script.closingShots },
   ];

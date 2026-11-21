@@ -28,8 +28,9 @@ type StepDef = { key: string; label: string; from: JobStatus | "created"; to: Jo
 export const STEP_DEFS: StepDef[] = [
   { key: "upload", label: "Upload", from: "created", to: "uploaded" },
   { key: "read", label: "Read the PDF", from: "uploaded", to: "proposing" },
-  // Points are auto-chosen; there is no user "Pick points" pause for now.
-  { key: "points", label: "Find points", from: "proposing", to: "points_selected" },
+  // Points are auto-chosen; the user then confirms add-ons before scripting starts.
+  { key: "points", label: "Find points", from: "proposing", to: "awaiting_selection" },
+  { key: "addons", label: "Confirm add-ons", from: "awaiting_selection", to: "points_selected", user: true },
   { key: "script", label: "Write script", from: "points_selected", to: "voicing" },
   { key: "voice", label: "Record voice", from: "voicing", to: "fetching_broll" },
   { key: "footage", label: "Find visual materials", from: "fetching_broll", to: "rendering" },
@@ -48,9 +49,9 @@ export type StepTiming = {
 
 export type JobTiming = {
   steps: StepTiming[];
-  /** Machine time: all non-user steps. */
+  /** Machine time: all steps except waiting on the user. */
   processingSeconds: number;
-  /** Created to finished (or to now, if still going). */
+  /** Created to finished (or to now, if still going), including user waits. */
   wallSeconds: number;
   running: boolean;
 };

@@ -5,8 +5,8 @@ import { parseAddons } from "@/lib/addons-input";
 /** While the article is read and points are found, the user can already choose the add-ons. */
 const EARLY_STATUSES: JobStatus[] = ["awaiting_upload", "uploaded", "extracting", "extracted", "proposing", "awaiting_selection"];
 
-// Save add-on choices while the article is prepared. Points are auto-chosen afterwards;
-// awaiting_selection remains only as a rare recovery status.
+// Save add-on choices while the article is prepared. After points are ready, Continue
+// (POST /select) submits the final add-ons and starts scripting.
 export async function POST(request: Request, ctx: RouteContext<"/api/jobs/[id]/addons">) {
   const { id } = await ctx.params;
   const body = await request.json().catch(() => null);

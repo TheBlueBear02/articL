@@ -74,7 +74,7 @@ Formats such as "3 things this study found" or myth vs fact can later become opt
 - Audience (Social / Student; Academic and Kids “soon”) lives in the sidebar and is saved with the job on upload.
 - Job page: **progress** on the left, **add-ons** (then the auto-chosen points list) in the middle, **article** preview on the right. The **reel** player (9:16 + download) only appears after render finishes, then as progress · article · reel.
 - **Production / Test** switch on the job page: Production shows a clean progress sidebar (no timing/tokens/cost); Test shows step durations, tokens and estimated OpenAI cost in the left sidebar, plus the script/voiceover panel.
-- Choose add-ons in the middle column while the paper is read; the best 5 points are chosen automatically (no manual pick for now).
+- Choose add-ons in the middle column while the paper is read; the best 5 points are chosen automatically. The job waits for **Continue** (add-ons confirm) before scripting starts.
 - A job page that survives a refresh.
 - "My videos" lists the 20 latest jobs with their audience and status.
 

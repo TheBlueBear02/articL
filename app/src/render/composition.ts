@@ -4,7 +4,7 @@
 // Structure: the film is a list of SHOTS (~3 s each, cut on caption boundaries). Each shot is a
 // photo or a muted stock-video clip inside an untimed wrapper; motion and fades are animated on
 // the wrapper because HyperFrames forbids tweening opacity/visibility on clip elements.
-import type { Segment, Word } from "../lib/jobs";
+import type { Chart, Segment, Word } from "../lib/jobs";
 import { alignToScript } from "./align";
 
 /** Keep this much air after a segment's last spoken word before the next one starts. */
@@ -30,6 +30,10 @@ const MAX_SHOTS_PER_SEGMENT = 4;
 export const FADE_S = 0.35;
 /** How long a number callout stays up after the number is spoken. */
 const CALLOUT_HOLD_S = 3.0;
+/** A chart stays up at least this long after its last value is spoken. */
+const CHART_HOLD_S = 2.5;
+/** ...and is on screen at least this long in all, running into the next beat if needed. */
+const CHART_MIN_S = 3.5;
 /** Pop-up photos: on screen this long, starting just before their word, with this much air between them. */
 const POPUP_S = 1.8;
 const POPUP_MIN_S = 1.2;
@@ -47,6 +51,8 @@ export type TimelineSegment = {
   words: Word[]; // script spelling, film-timeline times
   /** Student videos: the on-screen section label ("THE QUESTION"). */
   section?: string;
+  /** Beats only: a checked chart of the beat's numbers. */
+  chart?: Chart;
 };
 
 export type Timeline = { segments: TimelineSegment[]; duration: number };
@@ -80,6 +86,7 @@ export function buildTimeline(segments: Segment[]): Timeline {
       length,
       audioFile: `assets/seg-${index}.mp3`,
       ...(seg.section ? { section: seg.section } : {}),
+      ...(seg.kind === "beat" && seg.chart ? { chart: seg.chart } : {}),
       // Script spelling ("7.5", "2,703"), Whisper timing.
       words: alignToScript(seg.text, seg.words).map((w) => ({
         word: w.word,
@@ -176,7 +183,58 @@ export function planSectionList(timeline: Timeline): SectionList | null {
   return items.length && hide - show > 2 ? { items, marks, show, hide } : null;
 }
 
-export type Callout = { main: string; sub: string; start: number; end: number };
+/** A chart as drawn: each value with the time it is spoken and its size relative to the largest. */
+export type ChartView = {
+  kind: Chart["kind"];
+  /** Shown under the chart ("percentage points", "rupees"); "" for percent, which shows as "%". */
+  caption: string;
+  percent: boolean;
+  items: { label: string; value: string; at: number; size: number }[];
+};
+export type Callout = { main: string; sub: string; start: number; end: number; chart?: ChartView };
+
+const digitsOf = (word: string) => word.replace(/,(?=\d{3})/g, "").replace(/[^\d.]/g, "").replace(/\.$/, "");
+
+/**
+ * Time a beat's chart: each value appears as it is spoken (searching forward through the words, so
+ * "20 percent ... 12 percent" lines up in order). Null if the first value can't be found; the beat
+ * then gets the plain big-number callout.
+ */
+function chartCallout(seg: TimelineSegment, chart: Chart): Callout | null {
+  const w = seg.words;
+  let from = 0;
+  const times: number[] = [];
+  for (const it of chart.items) {
+    const j = w.findIndex((x, k) => k >= from && digitsOf(x.word) === it.value);
+    if (j >= 0) {
+      times.push(w[j].start);
+      from = j + 1;
+    } else if (times.length) {
+      times.push(round(times[times.length - 1] + 0.6));
+    } else return null;
+  }
+  const largest = Math.max(...chart.items.map((i) => Number(i.value)));
+  const segEnd = seg.start + seg.length;
+  const start = round(Math.max(seg.start, times[0] - 0.15));
+  const percent = chart.unit === "percent";
+  return {
+    main: "",
+    sub: "",
+    start,
+    end: round(Math.min(segEnd, Math.max(start + CALLOUT_HOLD_S, times[times.length - 1] + CHART_HOLD_S))),
+    chart: {
+      kind: chart.kind,
+      caption: percent ? "" : chart.unit,
+      percent,
+      items: chart.items.map((it, i) => ({
+        label: it.label,
+        value: it.value,
+        at: Math.min(times[i], round(segEnd - 0.3)),
+        size: chart.kind === "share" ? Number(it.value) / 100 : largest > 0 ? Number(it.value) / largest : 0,
+      })),
+    },
+  };
+}
 
 /**
  * One big-number callout per beat that speaks a number: "7.5" + "percentage points",
@@ -186,6 +244,11 @@ export function findCallouts(timeline: Timeline): Callout[] {
   const out: Callout[] = [];
   for (const seg of timeline.segments) {
     if (seg.kind !== "beat") continue;
+    const charted = seg.chart ? chartCallout(seg, seg.chart) : null;
+    if (charted) {
+      out.push(charted);
+      continue;
+    }
     const w = seg.words;
     const i = w.findIndex((x) => /\d/.test(x.word));
     if (i < 0) continue;
@@ -213,6 +276,15 @@ export function findCallouts(timeline: Timeline): Callout[] {
       end: round(Math.min(segEnd, w[i].start + CALLOUT_HOLD_S)),
     });
   }
+  // A chart needs reading time. Testing (Olken): "...about 24 percent" ended its beat, so the chart
+  // was up for 2 s. Let it run into the next beat, up to CHART_MIN_S, until the next callout needs
+  // the band, and never into the last second (the hook title comes back for the loop).
+  out.forEach((c, k) => {
+    if (!c.chart) return;
+    const next = out[k + 1]?.start ?? Infinity;
+    const limit = Math.min(next - 0.3, timeline.duration - 1);
+    if (c.end < limit) c.end = round(Math.max(c.end, Math.min(c.start + CHART_MIN_S, limit)));
+  });
   return out;
 }
 
@@ -701,6 +773,38 @@ export function buildCompositionHtml(
         margin-top: 22px; color: var(--ink); font-weight: 800; font-size: 46px; text-transform: uppercase;
         letter-spacing: 0.02em; text-shadow: 0 4px 18px rgba(0,0,0,0.8);
       }
+      /* Data visuals: a chart card in the callout band, for beats that compare numbers. */
+      .chart {
+        position: absolute; inset: 0; display: flex; flex-direction: column; justify-content: center;
+        background: rgba(0,0,0,0.66); border-radius: 28px; border-bottom: 10px solid var(--accent);
+        padding: 22px 36px 24px; box-shadow: 0 18px 50px rgba(0,0,0,0.45); visibility: hidden;
+      }
+      .chart .lbl { color: var(--ink); font-weight: 800; font-size: 40px; line-height: 46px; text-transform: uppercase; letter-spacing: 0.02em; }
+      .chart .val { color: var(--ink); font-weight: 900; font-size: 68px; line-height: 1; letter-spacing: -0.02em; white-space: nowrap; }
+      .chart .cap {
+        margin-top: 14px; text-align: center; color: var(--accent); font-weight: 800; font-size: 30px;
+        text-transform: uppercase; letter-spacing: 0.06em;
+      }
+      .chart .cnt { display: none; }
+      /* Bars: one row per group, label above a bar that grows as its number is said. */
+      .chart .brow { margin: 8px 0; }
+      .chart .btrack { position: relative; height: 70px; margin-top: 6px; }
+      .chart .bfill { position: absolute; left: 0; top: 0; bottom: 0; background: var(--accent); border-radius: 12px; transform-origin: 0 50%; }
+      .chart .btrack .val { position: absolute; top: 0; line-height: 70px; }
+      /* Change: two columns, before and after, with an arrow between. */
+      .chart .cols { display: flex; justify-content: center; align-items: flex-end; gap: 20px; height: 340px; }
+      .chart .col { width: 270px; display: flex; flex-direction: column; align-items: center; justify-content: flex-end; height: 100%; }
+      .chart .col .val { margin-bottom: 10px; }
+      .chart .cbar { flex: none; width: 170px; background: rgba(255,255,255,0.85); border-radius: 14px 14px 4px 4px; transform-origin: 50% 100%; }
+      .chart .col.last .cbar { background: var(--accent); }
+      .chart .col .lbl { margin-top: 12px; text-align: center; }
+      .chart .arrow { color: var(--accent); font-weight: 900; font-size: 90px; line-height: 1; align-self: center; }
+      /* Share: a 10x10 grid, one square per percent. */
+      .chart .share { display: flex; align-items: center; gap: 40px; }
+      .chart .grid { display: grid; grid-template-columns: repeat(10, 28px); gap: 6px; flex: none; }
+      .chart .sq { width: 28px; height: 28px; border-radius: 5px; background: rgba(255,255,255,0.2); }
+      .chart .share .val { font-size: 124px; color: var(--accent); }
+      .chart .share .lbl { margin-top: 10px; }
       /* Hook title: same band as the callouts (the hook has none), below the top UI zone. */
       #titlecard {
         position: absolute; z-index: 1001; left: 110px; right: 110px; top: 360px; height: 380px;
@@ -857,7 +961,85 @@ ${musicHtml}${sfxHtml ? `\n${sfxHtml}` : ""}
 
       // ---- Number callouts ----
       const callouts = document.getElementById("callouts");
+      // A number that counts up to its value in a few steps (stacked spans switched with tl.set:
+      // GSAP skips onUpdate callbacks when the renderer seeks straight to a frame).
+      const COUNT_STEPS = 8, COUNT_STEP_S = 0.06;
+      function counter(parent, value, percent, at) {
+        const dec = (value.split(".")[1] || "").length;
+        const fmt = (n) => n.toLocaleString("en-US", { minimumFractionDigits: dec, maximumFractionDigits: dec });
+        for (let k = 1; k <= COUNT_STEPS; k++) {
+          const s = document.createElement("span");
+          s.className = "cnt";
+          s.textContent = (k === COUNT_STEPS ? fmt(Number(value)) : fmt((Number(value) * k) / COUNT_STEPS)) + (percent ? "%" : "");
+          parent.appendChild(s);
+          tl.set(s, { display: "inline" }, at + (k - 1) * COUNT_STEP_S);
+          if (k < COUNT_STEPS) tl.set(s, { display: "none" }, at + k * COUNT_STEP_S);
+        }
+      }
+      const div = (cls, parent, text) => {
+        const d = document.createElement("div");
+        d.className = cls;
+        if (text) d.textContent = text;
+        if (parent) parent.appendChild(d);
+        return d;
+      };
+      function drawChart(c, box) {
+        const ch = c.chart;
+        const el = div("chart", box);
+        if (ch.kind === "bars") {
+          const BAR_MAX = 470;
+          ch.items.forEach((it) => {
+            const row = div("brow", el);
+            div("lbl", row, it.label);
+            const track = div("btrack", row);
+            const w = Math.max(24, Math.round(it.size * BAR_MAX));
+            const fill = div("bfill", track);
+            fill.style.width = w + "px";
+            const val = div("val", track);
+            val.style.left = w + 20 + "px";
+            tl.fromTo(fill, { scaleX: 0 }, { scaleX: 1, duration: 0.5, ease: "power2.out" }, it.at);
+            counter(val, it.value, ch.percent, it.at);
+          });
+        } else if (ch.kind === "change") {
+          const cols = div("cols", el);
+          const BAR_MAX = 140; // fits under the value with a 2-line label; flex: none keeps heights true
+          ch.items.forEach((it, i) => {
+            if (i > 0) {
+              const arrow = div("arrow", cols, "→");
+              tl.fromTo(arrow, { opacity: 0, x: -20 }, { opacity: 1, x: 0, duration: 0.3, ease: "power2.out" }, it.at - 0.1);
+            }
+            const col = div("col" + (i === ch.items.length - 1 ? " last" : ""), cols);
+            const val = div("val", col);
+            const bar = div("cbar", col);
+            bar.style.height = Math.max(16, Math.round(it.size * BAR_MAX)) + "px";
+            div("lbl", col, it.label);
+            tl.fromTo(bar, { scaleY: 0 }, { scaleY: 1, duration: 0.5, ease: "power2.out" }, it.at);
+            counter(val, it.value, ch.percent, it.at);
+          });
+        } else {
+          const it = ch.items[0];
+          const row = div("share", el);
+          const grid = div("grid", row);
+          const filled = [];
+          for (let k = 0; k < 100; k++) {
+            const sq = div("sq", grid);
+            if (k < Math.round(it.size * 100)) filled.push(sq);
+          }
+          const side = div("", row);
+          const val = div("val", side);
+          if (it.label) div("lbl", side, it.label);
+          if (filled.length) {
+            tl.fromTo(filled, { backgroundColor: "rgba(255,255,255,0.2)" }, { backgroundColor: "#ffd60a", duration: 0.05, stagger: 0.6 / filled.length, ease: "none" }, it.at);
+          }
+          counter(val, it.value, ch.percent, it.at);
+        }
+        if (ch.caption) div("cap", el, ch.caption);
+        tl.set(el, { visibility: "visible" }, c.start);
+        tl.fromTo(el, { opacity: 0, scale: 0.88 }, { opacity: 1, scale: 1, duration: 0.3, ease: "back.out(1.8)" }, c.start);
+        tl.set(el, { visibility: "hidden" }, c.end);
+      }
       DATA.callouts.forEach((c) => {
+        if (c.chart) return drawChart(c, callouts);
         const el = document.createElement("div");
         el.className = "callout";
         const num = document.createElement("div");

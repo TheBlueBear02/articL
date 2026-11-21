@@ -4,7 +4,8 @@ import { libraryInfo } from "@/lib/library";
 
 /**
  * Checks add-on choices sent by the page: { music?: "calm" | "upbeat" | "dramatic",
- * split?: "gameplay" | "satisfying", gameplayClip?: string, popups?: boolean, sfx?: boolean, map?: boolean }.
+ * split?: "gameplay" | "satisfying", gameplayClip?: string, popups?: boolean, sfx?: boolean, map?: boolean,
+ * charts?: boolean }.
  * Returns the cleaned choices, or an error message for a 400.
  */
 export async function parseAddons(raw: unknown): Promise<{ addons: Addons } | { error: string }> {
@@ -25,7 +26,7 @@ export async function parseAddons(raw: unknown): Promise<{ addons: Addons } | { 
     }
     addons.gameplayClip = input.gameplayClip;
   }
-  for (const key of ["popups", "sfx", "map"] as const) {
+  for (const key of ["popups", "sfx", "map", "charts"] as const) {
     if (input[key] == null) continue;
     if (typeof input[key] !== "boolean") return { error: `${key} must be true or false.` };
     // Keep false so "Off" is stored; missing keys stay default-on via resolveAddons.

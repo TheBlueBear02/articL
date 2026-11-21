@@ -1,5 +1,5 @@
 import { extractText, getDocumentProxy } from "unpdf";
-import { inngest, ARTICLE_UPLOADED, POINTS_SELECTED, type ArticleUploadedData } from "./client";
+import { inngest, ARTICLE_UPLOADED, type ArticleUploadedData } from "./client";
 import { supabaseAdmin, ARTICLES_BUCKET } from "@/lib/supabase/server";
 import { setJob } from "@/lib/supabase/jobs-db";
 import { proposePoints } from "@/lib/openai";
@@ -121,37 +121,19 @@ export const extractArticle = inngest.createFunction(
         return { ok: false, kept: kept.length, dropped, usage };
       }
 
-      // Auto-pick the best points (recommended first), then renumber so ids are tidy.
-      // Manual selection is skipped for now; the select API remains as a recovery path.
+      // Auto-mark the best points (recommended first), then renumber so ids are tidy.
+      // Wait here for the user to submit add-ons (Continue); scripting starts from /select.
       const points = applyRecommendations(kept, MAX_SELECTED_POINTS, audience).map((p, i) => ({ ...p, id: `p${i + 1}` }));
-      const selectedIds = points.filter((p) => p.recommended).map((p) => p.id);
-      const selected_at = new Date().toISOString();
       try {
-        await setJob(jobId, {
-          status: "points_selected",
-          candidate_points: points,
-          study_setting: setting,
-          selected_point_ids: selectedIds,
-          selected_at,
-        });
+        await setJob(jobId, { status: "awaiting_selection", candidate_points: points, study_setting: setting });
       } catch (e) {
         // Before migration 0007 there is no study_setting column: save the points without it.
         if (!/study_setting/.test(String(e))) throw e;
-        await setJob(jobId, {
-          status: "points_selected",
-          candidate_points: points,
-          selected_point_ids: selectedIds,
-          selected_at,
-        });
+        await setJob(jobId, { status: "awaiting_selection", candidate_points: points });
       }
       const modelRecommended = kept.filter((p) => p.recommended).length;
-      return { ok: true, kept: points.length, modelRecommended, selected: selectedIds.length, dropped, setting, usage };
+      return { ok: true, kept: points.length, modelRecommended, dropped, setting, usage };
     });
-
-    // Kick off script + voice once points are auto-chosen (same event as the old Continue button).
-    if (proposal.ok) {
-      await step.sendEvent("start-script", { name: POINTS_SELECTED, data: { jobId } });
-    }
 
     return { jobId, ...summary, proposal };
   },

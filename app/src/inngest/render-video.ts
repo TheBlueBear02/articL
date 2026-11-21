@@ -27,7 +27,7 @@ import {
   type BottomSource,
   type CompositionExtras,
 } from "@/render/composition";
-import { probeDuration, projectDir, readRenderStatus, startRender, VIDEO_FILE, writeProject } from "@/render/local";
+import { extractThumbnail, probeDuration, projectDir, readRenderStatus, startRender, VIDEO_FILE, writeProject } from "@/render/local";
 import { defaultRenderTarget, getCloudRender, startCloudRender, uploadZip, zipProject } from "@/lib/heygen";
 import { saveTokens, saveUsage } from "@/lib/usage-db";
 import { downloadLibraryFile, listGameplay, listMusic, pickFor, trackCredit } from "@/lib/library";
@@ -52,6 +52,11 @@ const SATISFYING_PIECE_S = 12;
 async function readAddons(jobId: string): Promise<Addons> {
   const { data, error } = await supabaseAdmin().from("jobs").select("addons").eq("id", jobId).single();
   return resolveAddons(error ? null : ((data?.addons ?? null) as Addons | null));
+}
+
+/** With the Data visuals add-on off, beats keep their plain big-number callout. */
+function chartsIf(segments: Segment[], addons: Addons): Segment[] {
+  return addons.charts === false ? segments.map((s) => ({ ...s, chart: undefined })) : segments;
 }
 
 async function readAddonMedia(jobId: string): Promise<AddonMedia> {
@@ -140,7 +145,8 @@ export const renderVideo = inngest.createFunction(
       await setJob(jobId, { status: "fetching_broll", render_progress: 0, error: null });
       const { data: job, error } = await supabaseAdmin().from("jobs").select("segments").eq("id", jobId).single();
       if (error || !job?.segments) throw new Error(`No voiceover segments for job ${jobId}`);
-      const segments = job.segments as Segment[];
+      // Charts take the callout band, so pop-ups are planned around them.
+      const segments = chartsIf(job.segments as Segment[], await readAddons(jobId));
 
       // ~3 s shots; each gets its segment's next shot search (older jobs: the one b-roll term).
       const shots = planShots(buildTimeline(segments));
@@ -270,7 +276,7 @@ export const renderVideo = inngest.createFunction(
         .eq("id", jobId)
         .single();
       if (error || !job) throw new Error(`Job ${jobId} not found: ${error?.message}`);
-      const segments = job.segments as Segment[];
+      const segments = chartsIf(job.segments as Segment[], await readAddons(jobId));
       const broll = job.broll as BrollImage[];
       const script = job.script as Script | null;
 
@@ -431,6 +437,17 @@ export const renderVideo = inngest.createFunction(
         .storage.from(MEDIA_BUCKET)
         .upload(storagePath, video, { contentType: "video/mp4", upsert: true });
       if (error) throw new Error(`Uploading the video failed: ${error.message}`);
+      // The home page carousel's card: free and under a second (the video is already on disk).
+      // A missing thumbnail never fails the job; the card then shows the hook title instead.
+      try {
+        const thumb = await extractThumbnail(path.join(dir, VIDEO_FILE));
+        const { error: thumbError } = await supabaseAdmin()
+          .storage.from(MEDIA_BUCKET)
+          .upload(`${jobId}/thumb.jpg`, thumb, { contentType: "image/jpeg", upsert: true });
+        if (thumbError) throw new Error(thumbError.message);
+      } catch (e) {
+        console.warn(`[render-video] no thumbnail for ${jobId}: ${e instanceof Error ? e.message : e}`);
+      }
       await setJob(jobId, { status: "rendered", render_progress: 100, video_path: storagePath });
       await rm(dir, { recursive: true, force: true });
       return storagePath;

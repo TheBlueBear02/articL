@@ -6,7 +6,7 @@ export const inngest = new Inngest({ id: "articl" });
 export const ARTICLE_UPLOADED = "articl/article.uploaded";
 export type ArticleUploadedData = { jobId: string };
 
-// Event sent once points are chosen (auto after propose, or via /select recovery) — starts Phase 3.
+// Event sent when the user confirms add-ons / continues (POST /select) — starts Phase 3.
 export const POINTS_SELECTED = "articl/points.selected";
 export type PointsSelectedData = { jobId: string };
 

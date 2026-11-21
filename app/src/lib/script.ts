@@ -1,6 +1,6 @@
 // Phase 3: turn the selected points into a spoken script, and check it before recording.
 import { chatJson, type Usage } from "./openai";
-import type { Audience, CandidatePoint, Script, StudySetting } from "./jobs";
+import { CHART_KINDS, type Audience, type CandidatePoint, type Script, type StudySetting } from "./jobs";
 import { settingBlock, targetMinWords } from "./script-checks";
 export {
   autoFixScript,
@@ -50,6 +50,19 @@ Write these fields:
   1-3 word photo search for it. Good: "villages", "ballot box", "female elites", "headmen's houses",
   "stock market". Bad: "45 percent" (a number), "strange part" (not a thing), "women" when the beat
   says "female elites" (not the beat's words). If the beat names nothing photographable, "" for both.
+- chart (each beat): an on-screen chart, only for numbers the beat says that compare.
+  kind "bars": the same measure for 2-3 groups (e.g. women vs men); "change": the same measure at
+  2 times or before vs after (labels such as "2007" and "2011"); "share": a single percentage of a
+  whole ("24 percent of villages"); "none" for anything else (one count, money, years, no number).
+  items, in the order the beat says them: label is 1-3 words copied from the point's source sentence
+  ("women", "control villages", "2007"); value is the number as digits exactly as the source sentence
+  writes it, no symbols ("31.2"). unit: "percent", "percentage points", 1-2 words from the source
+  sentence ("rupees"), or "". All items share the unit, and the beat must say every value.
+  Chart only what the source sentence itself compares: both values of a change, or each group's
+  value on the same measure. Never add a starting 0, a baseline or a total it doesn't give, and
+  never put two different measures on one chart. "percentage points" (an effect size) is never a
+  share. If unsure, "none": the beat's number is still shown big on screen.
+  With "none": items [] and unit "".
 - broll and shots for the hook, each beat and the closing: broll is 2-4 words for the topic;
   shots are 3 visually different stock-video searches of at most 3 concrete, filmable words
   (e.g. "voting booth", "coins"). No abstract ideas, arrows or icons.
@@ -148,7 +161,7 @@ const SCHEMA = {
       items: {
         type: "object",
         additionalProperties: false,
-        required: ["pointId", "text", "broll", "shots", "popup"],
+        required: ["pointId", "text", "broll", "shots", "popup", "chart"],
         properties: {
           pointId: { type: "string" },
           text: { type: "string" },
@@ -159,6 +172,24 @@ const SCHEMA = {
             additionalProperties: false,
             required: ["word", "query"],
             properties: { word: { type: "string" }, query: { type: "string" } },
+          },
+          chart: {
+            type: "object",
+            additionalProperties: false,
+            required: ["kind", "items", "unit"],
+            properties: {
+              kind: { type: "string", enum: ["none", ...CHART_KINDS] },
+              items: {
+                type: "array",
+                items: {
+                  type: "object",
+                  additionalProperties: false,
+                  required: ["label", "value"],
+                  properties: { label: { type: "string" }, value: { type: "string" } },
+                },
+              },
+              unit: { type: "string" },
+            },
           },
         },
       },

@@ -43,6 +43,7 @@ const PROGRESS_STEPS: ProgressStep[] = [
   { key: "upload", label: "Upload" },
   { key: "read", label: "Read article" },
   { key: "points", label: "Find points" },
+  { key: "addons", label: "Confirm add-ons" },
   { key: "script", label: "Write script" },
   { key: "voice", label: "Record voice" },
   { key: "footage", label: "Find visual materials" },
@@ -57,13 +58,13 @@ const STEP_OF: Partial<Record<JobStatus, number>> = {
   extracted: 1,
   proposing: 2,
   awaiting_selection: 3,
-  points_selected: 3,
-  scripting: 3,
-  voicing: 4,
-  voiced: 5,
-  fetching_broll: 5,
-  rendering: 6,
-  rendered: 7,
+  points_selected: 4,
+  scripting: 4,
+  voicing: 5,
+  voiced: 6,
+  fetching_broll: 6,
+  rendering: 7,
+  rendered: 8,
 };
 
 /** One row per pipeline step: green when done, in-row progress bar while that step runs. */
@@ -395,6 +396,7 @@ function AddonsPicker({
         [
           ["sfx", "Sound effects"],
           ["map", "Map intro"],
+          ["charts", "Data visuals"],
         ] as const
       ).map(([key, label]) => (
         <div key={key}>
@@ -445,6 +447,13 @@ type AddonControls = {
   onChange: (a: Addons) => void;
   saveState: "idle" | "saving" | "saved";
   onSave: () => void;
+  /** While reading: show Save. Once points are ready, Continue submits add-ons and starts the video. */
+  showSave: boolean;
+  continueAction?: {
+    onContinue: () => void;
+    disabled: boolean;
+    busy: boolean;
+  };
 };
 
 /** Middle column: add-ons (early statuses) and/or auto-chosen points while producing. */
@@ -461,26 +470,47 @@ function JobControlsColumn({
     <aside className="flex h-full min-h-[28rem] flex-col overflow-hidden rounded-2xl border border-neutral-200 bg-neutral-50/80 p-4 dark:border-neutral-800 dark:bg-neutral-900/50 lg:min-h-[32rem]">
       <div className="min-h-0 flex-1 space-y-6 overflow-y-auto">
         {addons && (
-          <AddonsPicker value={addons.value} onChange={addons.onChange} title="While you wait: add-ons">
-            <div className="mt-4">
-              <button
-                type="button"
-                onClick={addons.onSave}
-                disabled={addons.saveState !== "idle"}
-                className="w-full rounded-md bg-brand px-3 py-1.5 text-xs font-semibold text-neutral-900 disabled:opacity-40"
-              >
-                {addons.saveState === "saving" ? "Saving…" : addons.saveState === "saved" ? "Saved" : "Save add-ons"}
-              </button>
-              <p className="mt-1.5 text-[11px] leading-snug text-neutral-500 dark:text-neutral-400">
-                {addons.saveState === "saved"
-                  ? "Saved. Points are chosen automatically when ready."
-                  : "Saved with your choices if you leave this page."}
-              </p>
-            </div>
+          <AddonsPicker
+            value={addons.value}
+            onChange={addons.onChange}
+            title={addons.showSave ? "While you wait: add-ons" : "Add-ons"}
+          >
+            {addons.showSave && (
+              <div className="mt-4">
+                <button
+                  type="button"
+                  onClick={addons.onSave}
+                  disabled={addons.saveState !== "idle"}
+                  className="w-full rounded-md bg-brand px-3 py-1.5 text-xs font-semibold text-neutral-900 disabled:opacity-40"
+                >
+                  {addons.saveState === "saving" ? "Saving…" : addons.saveState === "saved" ? "Saved" : "Save add-ons"}
+                </button>
+                <p className="mt-1.5 text-[11px] leading-snug text-neutral-500 dark:text-neutral-400">
+                  {addons.saveState === "saved"
+                    ? "You can still change them before you continue."
+                    : "Saved with your choices if you leave this page."}
+                </p>
+              </div>
+            )}
           </AddonsPicker>
         )}
         {pointsSection}
       </div>
+      {addons?.continueAction && (
+        <div className="shrink-0 border-t border-neutral-200 pt-3 dark:border-neutral-800">
+          <button
+            type="button"
+            onClick={addons.continueAction.onContinue}
+            disabled={addons.continueAction.disabled}
+            className="w-full rounded-md bg-brand px-3 py-2 text-sm font-semibold text-neutral-900 disabled:opacity-40"
+          >
+            {addons.continueAction.busy ? "Starting…" : "Continue"}
+          </button>
+          <p className="mt-1.5 text-[11px] leading-snug text-neutral-500 dark:text-neutral-400">
+            Points are chosen automatically. Continue starts the video with these add-ons.
+          </p>
+        </div>
+      )}
     </aside>
   );
 }
@@ -665,12 +695,12 @@ export function JobView({ jobId }: { jobId: string }) {
   const [notFound, setNotFound] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [viewMode, setViewMode] = useState<JobViewMode>("production");
-  // Pop-up images, sound effects and the map intro are on by default.
+  const [continuing, setContinuing] = useState(false);
+  // Pop-up images, sound effects, the map intro and data visuals are on by default.
   const [addons, setAddonsState] = useState<Addons>(DEFAULT_ADDONS);
   // Add-ons can be chosen and saved while the article is read; "saved" until changed again.
   const [addonsSave, setAddonsSave] = useState<"idle" | "saving" | "saved">("idle");
   const [addonsLoaded, setAddonsLoaded] = useState(false);
-  const autoSelectStarted = useRef(false);
   function setAddons(a: Addons) {
     setAddonsState(resolveAddons(a));
     setAddonsSave("idle");
@@ -699,6 +729,26 @@ export function JobView({ jobId }: { jobId: string }) {
     } catch (e) {
       setAddonsSave("idle");
       setError(e instanceof Error ? e.message : String(e));
+    }
+  }
+
+  async function continueWithAddons() {
+    const pointIds = (job?.candidate_points ?? []).filter((p) => p.recommended).map((p) => p.id);
+    if (!jobId || !pointIds.length) return;
+    setContinuing(true);
+    setError(null);
+    try {
+      const res = await fetch(`/api/jobs/${jobId}/select`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ pointIds, addons }),
+      });
+      const body = (await readJson(res)) as { selected: string[] };
+      setJob((j) => (j ? { ...j, status: "points_selected", selected_point_ids: body.selected } : j));
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setContinuing(false);
     }
   }
 
@@ -747,30 +797,8 @@ export function JobView({ jobId }: { jobId: string }) {
     };
   }, [jobId, validId]);
 
-  // Recovery: jobs created before auto-select may still sit on awaiting_selection — continue them.
-  useEffect(() => {
-    if (!job || job.status !== "awaiting_selection" || autoSelectStarted.current) return;
-    const points = job.candidate_points ?? [];
-    const pointIds = points.filter((p) => p.recommended).map((p) => p.id);
-    if (!pointIds.length) return;
-    autoSelectStarted.current = true;
-    void (async () => {
-      try {
-        const res = await fetch(`/api/jobs/${jobId}/select`, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ pointIds, addons: resolveAddons(job.addons ?? addons) }),
-        });
-        const body = (await readJson(res)) as { selected: string[] };
-        setJob((j) => (j ? { ...j, status: "points_selected", selected_point_ids: body.selected } : j));
-      } catch (e) {
-        autoSelectStarted.current = false;
-        setError(e instanceof Error ? e.message : String(e));
-      }
-    })();
-  }, [job, jobId, addons]);
-
   const points: CandidatePoint[] = job?.candidate_points ?? [];
+  const recommended = points.filter((p) => p.recommended);
   const chosen = points.filter((p) => job?.selected_point_ids?.includes(p.id));
 
   if (notFound || !validId) return <p className="mt-8 text-sm text-red-600">This job doesn&apos;t exist (or was deleted).</p>;
@@ -778,16 +806,35 @@ export function JobView({ jobId }: { jobId: string }) {
 
   const isTest = viewMode === "test";
   const reelReady = job.status === "rendered";
+  const awaitingAddons = job.status === "awaiting_selection";
   const addonControls: AddonControls | undefined = EARLY_STATUSES.includes(job.status)
     ? {
         value: addons,
         onChange: setAddons,
         saveState: addonsSave,
         onSave: () => void saveAddons(),
+        showSave: !awaitingAddons,
+        continueAction: awaitingAddons
+          ? {
+              onContinue: () => void continueWithAddons(),
+              disabled: !recommended.length || continuing,
+              busy: continuing,
+            }
+          : undefined,
       }
     : undefined;
 
-  const pointsSection = IN_PRODUCTION.includes(job.status) ? (
+  const pointsSection = awaitingAddons ? (
+    <div>
+      <h2 className="text-sm font-semibold tracking-tight">Points for this video</h2>
+      <p className="mt-1 text-xs text-neutral-600 dark:text-neutral-400">Chosen automatically from the article.</p>
+      <ol className="mt-3 list-decimal space-y-1 pl-5 text-sm">
+        {recommended.map((p) => (
+          <li key={p.id}>{p.text}</li>
+        ))}
+      </ol>
+    </div>
+  ) : IN_PRODUCTION.includes(job.status) ? (
     <div>
       <h2 className="text-sm font-semibold tracking-tight">{STATUS_LABEL[job.status]}</h2>
       <p className="mt-3 text-xs text-neutral-600 dark:text-neutral-400">Points for this video:</p>
