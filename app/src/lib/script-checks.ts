@@ -408,8 +408,11 @@ export function numberInContext(n: string, text: string, source: string): boolea
     [...s.matchAll(new RegExp(`(?<![\\d.,])${escapeNum(n)}(?![\\d]|\\.\\d)((?:\\s+[A-Za-z][\\w-]*){1,3})`, "g"))].map((m) =>
       m[1].trim().split(/\s+/).map(singular),
     );
-  const sourceWords = after(source.replace(/,(?=\d{3}\b)/g, ""));
-  const uses = after(text.replace(/,(?=\d{3}\b)/g, ""));
+  // "6-week period" counts as "6 week period". Testing (Margalit): "over 6 weeks" was rejected
+  // because the article only wrote "a 6-week period".
+  const prep = (s: string) => s.replace(/,(?=\d{3}\b)/g, "").replace(/(\d)-(?=[A-Za-z])/g, "$1 ");
+  const sourceWords = after(prep(source));
+  const uses = after(prep(text));
   if (!uses.length) return false;
   // Every use of the number in the text needs its next word to follow the number in the source too.
   // (First two words, so "250 Afghan villages" still matches "250 villages"; filler words don't count.)

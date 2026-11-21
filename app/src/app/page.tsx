@@ -75,8 +75,10 @@ export default function Home() {
 
   return (
     <main className="mx-auto w-full max-w-6xl px-4 py-8 sm:px-6 sm:py-10 lg:py-12">
-      <header className="max-w-2xl">
-        <h1 className="text-3xl font-bold tracking-tight sm:text-4xl">Get your research seen beyond the academic world</h1>
+      <header className="max-w-none">
+        <h1 className="text-3xl font-bold tracking-tight sm:whitespace-nowrap sm:text-4xl">
+          Get your research seen like never before
+        </h1>
         <p className="mt-2 text-sm text-neutral-600 sm:text-base dark:text-neutral-400">
           Upload a paper, choose your audience, and get a short video with every number checked against your study.
         </p>

@@ -11,6 +11,10 @@ export const PRICES = {
   ttsPerMillionChars: 15.0,
   /** Whisper transcription: per minute of audio. */
   whisperPerMinute: 0.006,
+  /** HyperFrames Cloud (HeyGen), 1080p / 30 fps: per minute of output video
+   *  (platform.heygen.com/models/hyperframes, checked 2026-11-21). Billed by the second: a 50.4 s test
+   *  render on 2026-11-21 cost $0.13 (= 50.4 / 60 x $0.15). */
+  cloudRenderPerMinute: 0.15,
 } as const;
 
 /** One or more chat calls (points, script drafts, photo checks). */
@@ -28,11 +32,16 @@ export type TokenUsage = {
 /** One recorded voice part: text-to-speech + word timing. */
 export type VoiceUsage = { ttsChars: number; whisperSeconds: number };
 
-export type UsagePart = TokenUsage | VoiceUsage;
+/** A cloud render: seconds of output video. Local renders cost nothing and aren't recorded. */
+export type RenderUsage = { renderSeconds: number };
+
+export type UsagePart = TokenUsage | VoiceUsage | RenderUsage;
 /** jobs.usage (migration 0009): parts keyed "<step>:<part>", e.g. "script:2" or "voice:1:3". */
 export type JobUsage = Record<string, UsagePart>;
 
 const isTokens = (u: UsagePart): u is TokenUsage => "input" in u;
+const isVoice = (u: UsagePart): u is VoiceUsage => "ttsChars" in u;
+const isRender = (u: UsagePart): u is RenderUsage => "renderSeconds" in u;
 
 /** Add up chat calls; the model is the last one's (all steps use OPENAI_MODEL). */
 export function sumTokens(list: TokenUsage[]): TokenUsage | null {
@@ -64,7 +73,11 @@ export function voiceCost(u: VoiceUsage): number {
 }
 
 /** What one timing-panel step used: tokens, voice, or both (and the estimated cost). */
-export type StepUsage = { tokens: TokenUsage | null; voice: VoiceUsage | null; cost: number | null };
+export type StepUsage = { tokens: TokenUsage | null; voice: VoiceUsage | null; render?: RenderUsage | null; cost: number | null };
+
+export function renderCost(u: RenderUsage): number {
+  return (u.renderSeconds / 60) * PRICES.cloudRenderPerMinute;
+}
 
 /** Group a job's usage parts by step ("points", "script", "voice", "footage"). */
 export function usageByStep(usage: JobUsage | null | undefined): Record<string, StepUsage> {
@@ -73,12 +86,14 @@ export function usageByStep(usage: JobUsage | null | undefined): Record<string, 
   const out: Record<string, StepUsage> = {};
   for (const [step, parts] of Object.entries(groups)) {
     const tokens = sumTokens(parts.filter(isTokens));
-    const voices = parts.filter((p): p is VoiceUsage => !isTokens(p));
+    const voices = parts.filter(isVoice);
+    const renders = parts.filter(isRender);
+    const render = renders.length ? { renderSeconds: renders.reduce((a, b) => a + b.renderSeconds, 0) } : null;
     const voice = voices.length
       ? voices.reduce((a, b) => ({ ttsChars: a.ttsChars + b.ttsChars, whisperSeconds: a.whisperSeconds + b.whisperSeconds }))
       : null;
     const tc = tokens ? tokenCost(tokens) : 0;
-    out[step] = { tokens, voice, cost: tc === null ? null : tc + (voice ? voiceCost(voice) : 0) };
+    out[step] = { tokens, voice, render, cost: tc === null ? null : tc + (voice ? voiceCost(voice) : 0) + (render ? renderCost(render) : 0) };
   }
   return out;
 }
@@ -89,6 +104,7 @@ export function formatUsage(s: StepUsage): string {
   const bits: string[] = [];
   if (s.tokens) bits.push(`${k(s.tokens.input)} in · ${k(s.tokens.output)} out${s.tokens.calls > 1 ? ` · ${s.tokens.calls} calls` : ""}`);
   if (s.voice) bits.push(`${s.voice.ttsChars.toLocaleString("en-US")} chars · ${Math.round(s.voice.whisperSeconds)} s audio`);
+  if (s.render) bits.push(`${Math.round(s.render.renderSeconds)} s rendered in the cloud`);
   return bits.join(" · ");
 }
 

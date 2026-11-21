@@ -162,7 +162,13 @@ export type Addons = {
   sfx?: boolean;
   /** A map zooming into the study's country in the first beat (on by default; needs a known country). */
   map?: boolean;
+  /** Where the video renders: "local" (this computer, free) or "cloud" (HeyGen, paid per minute).
+   *  Missing = the server's default (RENDER_MODE in .env, else local). */
+  render?: RenderTarget;
 };
+
+export const RENDER_TARGETS = ["local", "cloud"] as const;
+export type RenderTarget = (typeof RENDER_TARGETS)[number];
 
 /** Pop-ups, sound effects and map start on; music and split stay off until chosen. */
 export const DEFAULT_ADDONS: Addons = { popups: true, sfx: true, map: true };
@@ -244,7 +250,13 @@ export type GameplayClip = {
   /** Short-lived signed link for a preview on the points screen. */
   previewUrl?: string;
 };
-export type LibraryInfo = { music: Record<MusicMood, number>; gameplay: number; gameplayClips: GameplayClip[] };
+export type LibraryInfo = {
+  music: Record<MusicMood, number>;
+  gameplay: number;
+  gameplayClips: GameplayClip[];
+  /** Where videos render by default, and whether HeyGen Cloud can be chosen (an API key is set). */
+  render?: { default: RenderTarget; cloud: boolean };
+};
 
 export type Job = {
   id: string;

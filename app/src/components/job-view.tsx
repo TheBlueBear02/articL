@@ -409,6 +409,32 @@ function AddonsPicker({
           </div>
         </div>
       ))}
+
+      {/* Local is free; HeyGen Cloud is paid per minute of video. Missing choice = the server default. */}
+      <p className="mt-3 text-xs text-neutral-600 dark:text-neutral-400">Render on</p>
+      <div className="mt-1 grid gap-1.5" style={rowStyle(2)}>
+        {(
+          [
+            ["local", "This computer", "Free; about 4-7 minutes"],
+            ["cloud", "HeyGen Cloud", "About $0.15 per minute of video"],
+          ] as const
+        ).map(([target, label, hint]) => {
+          const disabled = target === "cloud" && !lib?.render?.cloud;
+          const on = (value.render ?? lib?.render?.default ?? "local") === target;
+          return (
+            <button
+              key={target}
+              type="button"
+              disabled={disabled}
+              title={disabled ? "Cloud rendering isn't set up (no HEYGEN_API_KEY)" : hint}
+              className={btn(on, disabled)}
+              onClick={() => onChange({ ...value, render: target })}
+            >
+              {label}
+            </button>
+          );
+        })}
+      </div>
       {children}
     </div>
   );
@@ -489,7 +515,7 @@ function TimingSidebar({ job }: { job: Job }) {
             {formatDuration(timing.wallSeconds)} total
             {totalCost !== null && (
               <>
-                <span className="text-neutral-400"> · </span>~{formatCost(totalCost)} OpenAI (est.)
+                <span className="text-neutral-400"> · </span>~{formatCost(totalCost)} est. cost
               </>
             )}
           </p>

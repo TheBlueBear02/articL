@@ -6,7 +6,6 @@ import { setJob, MEDIA_BUCKET } from "@/lib/supabase/jobs-db";
 import { searchPhotosCached, searchVideosCached } from "@/lib/pixabay";
 import { downloadMedia, pickShotMedia } from "@/lib/pixabay-api";
 import { choosePopupPhoto } from "./footage";
-import { saveTokens } from "@/lib/usage-db";
 import type { TokenUsage } from "@/lib/pricing";
 import { buildMapScene, findCountry, periodLabel, placeNames } from "@/render/map";
 import {
@@ -29,6 +28,8 @@ import {
   type CompositionExtras,
 } from "@/render/composition";
 import { probeDuration, projectDir, readRenderStatus, startRender, VIDEO_FILE, writeProject } from "@/render/local";
+import { defaultRenderTarget, getCloudRender, startCloudRender, uploadZip, zipProject } from "@/lib/heygen";
+import { saveTokens, saveUsage } from "@/lib/usage-db";
 import { downloadLibraryFile, listGameplay, listMusic, pickFor, trackCredit } from "@/lib/library";
 import {
   resolveAddons,
@@ -37,6 +38,7 @@ import {
   type BrollImage,
   type PopupMedia,
   type PreparedPopup,
+  type RenderTarget,
   type Script,
   type Segment,
   type StudySetting,
@@ -260,7 +262,7 @@ export const renderVideo = inngest.createFunction(
       };
     });
 
-    await step.run("start-render", async () => {
+    const started = await step.run("start-render", async () => {
       await setJob(jobId, { status: "rendering", render_progress: 0 });
       const { data: job, error } = await supabaseAdmin()
         .from("jobs")
@@ -385,8 +387,11 @@ export const renderVideo = inngest.createFunction(
         ...media,
         ...extraFiles,
       ]);
-      await startRender(dir);
+      // This computer (free) or HeyGen Cloud (paid per minute): the job's choice, else RENDER_MODE.
+      const target: RenderTarget = (await readAddons(jobId)).render ?? defaultRenderTarget();
+      if (target === "local") await startRender(dir);
       return {
+        target,
         dir,
         duration: timeline.duration,
         shots: shots.length,
@@ -398,8 +403,10 @@ export const renderVideo = inngest.createFunction(
       };
     });
 
-    // Poll the detached render process; mirror its progress to the job for the page.
     const dir = projectDir(jobId); // deterministic, so safe outside a step
+    if (started.target === "cloud") return renderInCloud(jobId, dir, step);
+
+    // Poll the detached render process; mirror its progress to the job for the page.
     let finished: { exitCode: number | null; logTail: string } | null = null;
     for (let i = 0; i < MAX_POLLS && !finished; i++) {
       await step.sleep(`wait-${i}`, POLL_EVERY);
@@ -432,3 +439,74 @@ export const renderVideo = inngest.createFunction(
     return { jobId, ok: true, videoPath };
   },
 );
+
+/** How often to check a cloud render, and for how long at most (40 minutes, as locally). */
+const CLOUD_POLLS = 120;
+
+/**
+ * Render the project folder on HeyGen Cloud: zip and upload it, start the render, poll every 20 s,
+ * then copy the MP4 and HeyGen's thumbnail into Storage (HeyGen's links are short-lived and its
+ * retention isn't documented). A cloud failure fails the job with HeyGen's own reason: it never
+ * falls back to the local render, so it's always clear which one ran.
+ */
+async function renderInCloud(
+  jobId: string,
+  dir: string,
+  step: { run: <T>(id: string, fn: () => Promise<T>) => Promise<unknown>; sleep: (id: string, d: string) => Promise<unknown> },
+) {
+  const renderId = (await step.run("cloud-submit", async () => {
+    const zip = await zipProject(dir);
+    // The job id as idempotency key: an Inngest retry reuses the same upload and render (no double bill).
+    const assetId = await uploadZip(zip, `articl-${jobId}.zip`, `articl-upload-${jobId}`);
+    const id = await startCloudRender(assetId, `ArticL ${jobId}`, `articl-render-${jobId}`);
+    console.log(`[render-video] cloud render ${id} for ${jobId} (zip ${(zip.length / 1e6).toFixed(1)} MB)`);
+    return id;
+  })) as string;
+
+  let result: Awaited<ReturnType<typeof getCloudRender>> | null = null;
+  for (let i = 0; i < CLOUD_POLLS && !result; i++) {
+    await step.sleep(`cloud-wait-${i}`, POLL_EVERY);
+    const r = (await step.run(`cloud-check-${i}`, () => getCloudRender(renderId))) as Awaited<ReturnType<typeof getCloudRender>>;
+    if (r.status === "completed" || r.status === "failed") result = r;
+  }
+
+  if (!result || result.status === "failed" || !result.video_url) {
+    const why = !result
+      ? "Cloud render timed out after 40 minutes."
+      : `Cloud render failed${result.failure_code ? ` (${result.failure_code})` : ""}: ${result.failure_message ?? "no video returned"}${result.failure_detail ? ` — ${result.failure_detail}` : ""}`;
+    await step.run("fail-render", () => setJob(jobId, { status: "failed", error: why }));
+    return { jobId, ok: false, target: "cloud" as const };
+  }
+
+  const done = result;
+  const videoPath = (await step.run("upload-video", async () => {
+    const fetchBytes = async (url: string) => {
+      const res = await fetch(url);
+      if (!res.ok) throw new Error(`Downloading from HeyGen failed (${res.status}).`);
+      return { bytes: Buffer.from(await res.arrayBuffer()), type: res.headers.get("content-type") ?? "" };
+    };
+    const storage = supabaseAdmin().storage.from(MEDIA_BUCKET);
+    const video = await fetchBytes(done.video_url!);
+    const storagePath = `${jobId}/video.mp4`;
+    const { error } = await storage.upload(storagePath, video.bytes, { contentType: "video/mp4", upsert: true });
+    if (error) throw new Error(`Uploading the video failed: ${error.message}`);
+    // HeyGen's thumbnail becomes the home page carousel's card (never fails the job).
+    if (done.thumbnail_url) {
+      try {
+        const thumb = await fetchBytes(done.thumbnail_url);
+        // Always image/jpeg: HeyGen serves it as binary/octet-stream, which the media bucket refuses.
+        const { error: thumbError } = await storage.upload(`${jobId}/thumb.jpg`, thumb.bytes, { contentType: "image/jpeg", upsert: true });
+        if (thumbError) throw new Error(thumbError.message);
+      } catch (e) {
+        console.warn(`[render-video] no thumbnail for ${jobId}: ${e instanceof Error ? e.message : e}`);
+      }
+    }
+    // Billed per minute of output video (the timing panel shows the estimate).
+    if (done.duration) await saveUsage(jobId, "render:cloud", { renderSeconds: done.duration });
+    await setJob(jobId, { status: "rendered", render_progress: 100, video_path: storagePath });
+    await rm(dir, { recursive: true, force: true });
+    return storagePath;
+  })) as string;
+
+  return { jobId, ok: true, target: "cloud" as const, videoPath };
+}

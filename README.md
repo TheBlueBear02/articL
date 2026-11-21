@@ -51,6 +51,7 @@ Turns an article PDF into a short, Reels-style vertical video. AI picks the key 
    - OpenAI key (TTS, Whisper, and points via `OPENAI_MODEL`, default `gpt-5-mini`)
    - Supabase project URL, publishable key and secret key (Project Settings → API Keys)
    - Pixabay key (b-roll, used by the spike scripts)
+   - Optional, for cloud rendering: `HEYGEN_API_KEY` (HeyGen API key). `RENDER_MODE=cloud` makes the cloud the pre-selected choice (default: `local`); `CLOUD_RENDER_QUALITY` = `draft` | `standard` (default) | `high`. Restart `npm run dev` after changing `.env`.
 3. **Run** these in two terminals, both from `app/`:
    ```powershell
    npm run dev
@@ -102,7 +103,10 @@ The source credit is never a reason to rewrite. If its surnames aren't in the fi
 - Re-compressing finished videos was tested: about 25% smaller (40 to 30 MB) for ~2 minutes of extra work per video on the dev laptop, so it isn't done.
 
 ## Known prototype limits
-- Rendering runs on the machine running `npm run dev` (project in the OS temp folder, `articl-render/<jobId>`). It won't work on Vercel until HyperFrames Cloud is wired in. HyperFrames renders one video at a time per machine, so a second video waits for the first to finish.
+- Rendering: each video's add-ons include **Render on: This computer / HeyGen Cloud**.
+  - **This computer** (free, the default): the HyperFrames CLI on the machine running `npm run dev` (project in the OS temp folder, `articl-render/<jobId>`), one video at a time.
+  - **HeyGen Cloud** (`app/src/lib/heygen.ts`): the same project folder is zipped, sent with HeyGen's direct upload, and rendered at 1080p, 9:16, 30 fps; the job polls every 20 s, then copies the MP4 and HeyGen's thumbnail into Storage. $0.15 per minute of video, billed by the second (a 50 s video cost $0.13 in testing, rendered in 88 s versus ~4 minutes locally); the timing panel shows the estimate. A failed cloud render fails the job with HeyGen's reason and never falls back to local. Needs `HEYGEN_API_KEY` and credit on the HeyGen account; without the key the option is greyed out.
+  - Vercel can only use the cloud option (it can't run the local CLI).
 - B-roll photos are matched only by the script's 2–4 word search terms, so some fit loosely.
 - No sign-in yet. Anyone holding the publishable key can read every job row (see the policy note in `0001_jobs.sql`).
 - The checks verify numbers and setting facts, not framing. In testing, a hook said "investing just once" for a study where people invested over 6 weeks.

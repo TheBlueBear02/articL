@@ -12,6 +12,7 @@
   "dependencies": {
     "@supabase/supabase-js": "^2.119.1",
     "d3-geo": "^3.1.2",
+    "fflate": "^0.8.2",
     "inngest": "^4.26.2",
     "next": "16.4.6",
     "react": "19.3.0",
