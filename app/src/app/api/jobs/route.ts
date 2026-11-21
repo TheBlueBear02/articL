@@ -1,5 +1,6 @@
 import { supabaseAdmin, ARTICLES_BUCKET } from "@/lib/supabase/server";
 import { MAX_PDF_BYTES } from "@/lib/jobs";
+import { audienceColumn, parseAudience } from "@/lib/audience-input";
 
 // Step 1 of an upload: create the job row and hand the browser a one-time signed
 // URL so the PDF goes straight to Supabase Storage (not through this server).
@@ -15,13 +16,16 @@ export async function POST(request: Request) {
     return Response.json({ error: "PDFs must be under 20 MB." }, { status: 400 });
   }
 
+  const parsed = parseAudience(body?.audience);
+  if ("error" in parsed) return Response.json({ error: parsed.error }, { status: 400 });
+
   const supabase = supabaseAdmin();
   const id = crypto.randomUUID();
   const filePath = `${id}.pdf`;
 
   const { error: insertError } = await supabase
     .from("jobs")
-    .insert({ id, original_filename: filename, file_path: filePath });
+    .insert({ id, original_filename: filename, file_path: filePath, ...audienceColumn(parsed.audience) });
   if (insertError) {
     return Response.json({ error: `Could not create job: ${insertError.message}` }, { status: 500 });
   }

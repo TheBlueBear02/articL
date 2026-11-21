@@ -4,8 +4,9 @@ import { setJob, MEDIA_BUCKET } from "@/lib/supabase/jobs-db";
 import {
   autoFixScript,
   checkScript,
-  DEFAULT_MAX_WORDS,
   draftScript,
+  lengthFor,
+  sectionFor,
   OPTIONAL_FIELD_PROBLEM,
   scriptSegments,
   settingBlock,
@@ -13,9 +14,11 @@ import {
   verifyCredit,
 } from "@/lib/script";
 import { textToSpeech, transcribeWords } from "@/lib/voice";
-import type { CandidatePoint, Script, Segment, StudySetting } from "@/lib/jobs";
+import { prefetchFootage } from "./footage";
+import { saveTokens, saveUsage, tokensOf } from "@/lib/usage-db";
+import type { TokenUsage } from "@/lib/pricing";
+import { audienceOf, type CandidatePoint, type Script, type Segment, type StudySetting } from "@/lib/jobs";
 
-const MAX_DURATION_S = 60;
 const DRAFT_ATTEMPTS = 3; // the reel-structure checks (loop lead-in, hashtags) reject more first drafts
 
 // Phase 3: selected points -> checked script -> voiceover per segment -> word timestamps.
@@ -31,7 +34,17 @@ export const produceVoice = inngest.createFunction(
   },
   async ({ event, step }) => {
     const { jobId } = event.data as PointsSelectedData;
-    let maxWords = DEFAULT_MAX_WORDS;
+    // Separate query so jobs keep working before migration 0008 adds the column.
+    const audience = await step.run("read-audience", async () => {
+      const { data } = await supabaseAdmin().from("jobs").select("audience").eq("id", jobId).single();
+      return audienceOf(data ?? {});
+    });
+    // Social: aim for 60 s, never over 75 s. Student: aim for 90 s, never over 100 s. A longer
+    // recording than the aim gets one shorter rewrite; a little over beats a failed run.
+    const { maxWords: startWords, targetS: MAX_DURATION_S, hardMaxS: HARD_MAX_DURATION_S, ttsSpeed } = lengthFor(audience);
+    let maxWords = startWords;
+    /** Round 1's checked, recorded version, kept in case the shorter rewrite fails. */
+    let previous: { segments: Segment[]; total: number; script: Script } | null = null;
 
     // At most two rounds: if the recorded audio runs over 60 s, redraft shorter and re-record once.
     for (let round = 1; round <= 2; round++) {
@@ -58,12 +71,14 @@ export const produceVoice = inngest.createFunction(
         const opening = text.slice(0, 3000);
 
         let feedback: string[] = [];
+        const calls: TokenUsage[] = []; // every draft attempt is billed, passed or not
         for (let attempt = 1; attempt <= DRAFT_ATTEMPTS; attempt++) {
-          const { script: raw, usage, model } = await draftScript({ title, opening, points, setting, maxWords, feedback });
+          const { script: raw, usage, model } = await draftScript({ title, opening, points, setting, maxWords, feedback, audience });
+          calls.push(tokensOf(model, usage));
           // Slips with one right answer are corrected, not sent back for a rewrite.
-          let { script: drafted } = autoFixScript(raw, points);
+          let { script: drafted } = autoFixScript(raw, points, audience);
           const source = `${title}\n${opening}`;
-          feedback = checkScript(drafted, points, maxWords, source, settingText);
+          feedback = checkScript(drafted, points, maxWords, source, settingText, audience);
           // Last try: if only the optional on-screen title or post caption still fail, leave those
           // out rather than fail the whole video, and accept a script that's a little short.
           // Spoken-script problems still fail the run.
@@ -74,17 +89,30 @@ export const produceVoice = inngest.createFunction(
               hookTitle: feedback.some((p) => p.startsWith("Hook title")) ? undefined : drafted.hookTitle,
               postCaption: feedback.some((p) => p.startsWith("Post caption")) ? undefined : drafted.postCaption,
             };
-            feedback = checkScript(drafted, points, maxWords, source, settingText).filter((p) => !SOFT_PROBLEM.test(p));
+            feedback = checkScript(drafted, points, maxWords, source, settingText, audience).filter((p) => !SOFT_PROBLEM.test(p));
           }
           if (!feedback.length) {
             const script = { ...drafted, sourceCredit: verifyCredit(drafted.sourceCredit, text) };
             await setJob(jobId, { script });
-            return { ok: true as const, script, usage, model, attempt };
+            const pointTypes = Object.fromEntries(points.map((p) => [p.id, p.type]));
+            await saveTokens(jobId, `script:${round}`, calls);
+            return { ok: true as const, script, usage, model, attempt, pointTypes };
           }
         }
+        await saveTokens(jobId, `script:${round}`, calls);
         return { ok: false as const, problems: feedback };
       });
 
+      if (!draft.ok && previous) {
+        // The shorter rewrite failed its checks, but the first version passed and is recorded: use it
+        // (a little over the target beats a failed run). Testing: a 135-word rewrite failed 3 times.
+        const kept = previous;
+        await step.run("save-voice-fallback", () =>
+          setJob(jobId, { status: "voiced", segments: kept.segments, total_duration_s: kept.total, error: null }),
+        );
+        await step.sendEvent("start-render", { name: VOICE_READY, data: { jobId } });
+        return { jobId, ok: true, total: kept.total, rounds: round, fallback: draft.problems };
+      }
       if (!draft.ok) {
         await step.run(`fail-script-${round}`, () =>
           setJob(jobId, {
@@ -96,39 +124,57 @@ export const produceVoice = inngest.createFunction(
       }
 
       const script = draft.script as Script;
-      const parts = scriptSegments(script);
-      const segments: Segment[] = [];
+      // Student videos label each part on screen ("THE QUESTION"), from its point's type.
+      const parts = scriptSegments(script).map((part) => ({
+        ...part,
+        section: sectionFor(part.kind, "pointId" in part ? draft.pointTypes[part.pointId] : undefined, audience),
+      }));
+      await step.run(`mark-voicing-${round}`, () => setJob(jobId, { status: "voicing" }));
 
-      // One step per segment, so a failed TTS/Whisper call only retries that piece.
-      for (const [i, part] of parts.entries()) {
-        const seg = await step.run(`voice-${round}-${i}`, async () => {
-          if (i === 0) await setJob(jobId, { status: "voicing" });
-          const audio = await textToSpeech(part.text);
+      // All parts are recorded at the same time, one step each, so a failed TTS/Whisper call only
+      // retries that piece. Alongside them, the footage searches run (they only need the script).
+      // Testing: recording one part after another took 30-138 s; footage search 17-28 s after it.
+      const prefetch = step.run(`prefetch-footage-${round}`, () =>
+        prefetchFootage(jobId, script, round).catch((e) => {
+          console.warn(`[produce-voice] footage prefetch failed for ${jobId}: ${e instanceof Error ? e.message : e}`);
+          return null;
+        }),
+      );
+      const recorded = parts.map((part, i) =>
+        step.run(`voice-${round}-${i}`, async () => {
+          const audio = await textToSpeech(part.text, ttsSpeed);
           const audioPath = `${jobId}/r${round}-seg-${i}.mp3`;
           const { error } = await supabaseAdmin()
             .storage.from(MEDIA_BUCKET)
             .upload(audioPath, audio, { contentType: "audio/mpeg", upsert: true });
           if (error) throw new Error(`Uploading ${audioPath} failed: ${error.message}`);
           const { duration, words } = await transcribeWords(audio, part.text);
+          // tts-1 bills the characters read aloud; Whisper the minutes of audio it hears.
+          await saveUsage(jobId, `voice:${round}:${i}`, { ttsChars: part.text.length, whisperSeconds: duration });
           return { ...part, audioPath, duration, words };
-        });
-        segments.push(seg as Segment);
-      }
+        }),
+      );
+      const [segments] = await Promise.all([Promise.all(recorded) as Promise<Segment[]>, prefetch]);
 
       const total = Math.round(segments.reduce((s, x) => s + x.duration, 0) * 100) / 100;
       if (total <= MAX_DURATION_S || round === 2) {
+        // After the shorter rewrite, use whichever recording is shorter, if it's within the hard limit.
+        const best = previous && previous.total < total ? previous : { segments, total };
+        const ok = best.total <= HARD_MAX_DURATION_S;
         await step.run("save-voice", () =>
           setJob(jobId, {
-            status: total <= MAX_DURATION_S ? "voiced" : "failed",
-            segments,
-            total_duration_s: total,
-            error: total <= MAX_DURATION_S ? null : `Voiceover is ${total}s, over the ${MAX_DURATION_S}s limit.`,
+            status: ok ? "voiced" : "failed",
+            segments: best.segments,
+            total_duration_s: best.total,
+            error: ok ? null : `Voiceover is ${best.total}s, over the ${HARD_MAX_DURATION_S}s limit.`,
+            ...(best !== previous ? {} : { script: previous.script }),
           }),
         );
         // Hand off to Phase 4 (b-roll + render).
-        if (total <= MAX_DURATION_S) await step.sendEvent("start-render", { name: VOICE_READY, data: { jobId } });
-        return { jobId, ok: total <= MAX_DURATION_S, total, rounds: round, draftAttempts: draft.attempt };
+        if (ok) await step.sendEvent("start-render", { name: VOICE_READY, data: { jobId } });
+        return { jobId, ok, total: best.total, rounds: round, draftAttempts: draft.attempt };
       }
+      previous = { segments, total, script };
 
       // Too long: shrink the word budget in proportion (with a little margin) and go again.
       maxWords = Math.floor((maxWords * MAX_DURATION_S * 0.95) / total);

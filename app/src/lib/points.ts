@@ -1,5 +1,5 @@
 // Pure helpers for Phase 2 (no framework imports, so they can be tested with plain node).
-import type { CandidatePoint, SettingFact, StudySetting } from "./jobs";
+import type { Audience, CandidatePoint, SettingFact, StudySetting } from "./jobs";
 
 const BACK_MATTER_HEADING = /^(references|bibliography|works cited)\s*$/gim;
 
@@ -51,14 +51,14 @@ function numbersIn(s: string): string[] {
 }
 
 /**
- * Decide the pre-selected points after verification. Keeps the model's recommended points
+ * Decide the auto-selected points after verification. Keeps the model's recommended points
  * (in its order); if verification dropped some, tops up from the remaining points in order.
- * Returns all points with recommended ones first, so the checklist leads with the picks.
+ * Returns all points with recommended ones first (those are the selected set).
  */
-export function applyRecommendations(points: CandidatePoint[], max: number): CandidatePoint[] {
+export function applyRecommendations(points: CandidatePoint[], max: number, audience: Audience = "social"): CandidatePoint[] {
   const modelPicks = points.filter((p) => p.recommended);
   const others = points.filter((p) => !p.recommended);
-  const picks = [...modelPicks, ...others].slice(0, max);
+  const picks = audience === "student" ? studentMix([...modelPicks, ...others], max) : [...modelPicks, ...others].slice(0, max);
   const pickSet = new Set(picks);
   return [
     ...picks.map((p) => ({ ...p, recommended: true })),
@@ -66,32 +66,113 @@ export function applyRecommendations(points: CandidatePoint[], max: number): Can
   ];
 }
 
+const STUDENT_RANK: Partial<Record<CandidatePoint["type"], number>> = { question: 0, method: 1 };
+const isFinding = (p: CandidatePoint) => p.type !== "question" && p.type !== "method";
+
+/** Student picks: at most this many of each kind; findings fill the rest. */
+const STUDENT_MAX = { question: 1, method: 2 };
+
+/**
+ * Student picks: 1 question, up to 2 method points and the rest findings, each kind in the
+ * model's order (its recommended points first), always including the main result. Kinds that run
+ * short are topped up from whatever is left. Ordered question -> method -> findings with the main
+ * result last, the order the video tells them in.
+ * Testing (Margalit): the model recommended 1 question + 4 methods and no finding at all.
+ */
+function studentMix(ranked: CandidatePoint[], max: number): CandidatePoint[] {
+  const out: CandidatePoint[] = [
+    ...ranked.filter((p) => p.type === "question").slice(0, STUDENT_MAX.question),
+    ...ranked.filter((p) => p.type === "method").slice(0, STUDENT_MAX.method),
+  ].slice(0, max);
+  // The main result always goes in (as a finding), so the video answers its own question.
+  const main = ranked.find((p) => p.main && isFinding(p));
+  out.push(...ranked.filter((p) => isFinding(p) && p !== main).slice(0, max - out.length - (main ? 1 : 0)));
+  if (main) out.push(main);
+  out.push(...ranked.filter((p) => !out.includes(p)).slice(0, max - out.length));
+  // Findings keep their order, with the main result last.
+  return out
+    .map((p, i) => ({ p, i: p === main ? Infinity : i }))
+    .sort((a, b) => (STUDENT_RANK[a.p.type] ?? 2) - (STUDENT_RANK[b.p.type] ?? 2) || a.i - b.i)
+    .map(({ p }) => p);
+}
+
 export type VerifyResult = {
   kept: CandidatePoint[];
   dropped: { point: CandidatePoint; reason: string }[];
 };
 
+/** A point's evidence may join at most this many quoted pieces. */
+const MAX_EVIDENCE_PIECES = 4;
+
+/** Longest interruption allowed inside a quoted sentence: about one footnote or page header. */
+const FOOTNOTE_GAP = 2000;
+/** Words that must match on each side of such an interruption. */
+const MIN_SIDE_WORDS = 5;
+
+/**
+ * Is this (matchKey'd) quote in the (matchKey'd) article? Exactly, or as two parts with one short
+ * interruption between them: PDF text puts footnotes and page headers wherever the page broke.
+ * Every word must still be there, in order. Testing (Olken): "To examine these alternative
+ * approaches to fighting corruption, I [footnote 1 ...] designed and conducted a randomized..."
+ */
+export function foundInSource(piece: string, source: string): boolean {
+  if (source.includes(piece)) return true;
+  const words = piece.split(" ");
+  for (let k = MIN_SIDE_WORDS; k <= words.length - MIN_SIDE_WORDS; k++) {
+    const head = words.slice(0, k).join(" ");
+    const tail = words.slice(k).join(" ");
+    for (let at = source.indexOf(head); at >= 0; at = source.indexOf(head, at + 1)) {
+      const after = at + head.length;
+      const next = source.indexOf(tail, after);
+      if (next >= 0 && next - after <= FOOTNOTE_GAP) return true;
+    }
+  }
+  return false;
+}
+
+/** Small spelled-out numbers in a quote count as digits: Olken writes "about eight percentage points". */
+const SPELLED: Record<string, number> = {
+  one: 1, two: 2, three: 3, four: 4, five: 5, six: 6, seven: 7, eight: 8, nine: 9, ten: 10, eleven: 11,
+  twelve: 12, thirteen: 13, fourteen: 14, fifteen: 15, sixteen: 16, seventeen: 17, eighteen: 18,
+  nineteen: 19, twenty: 20, thirty: 30, forty: 40, fifty: 50, sixty: 60, seventy: 70, eighty: 80, ninety: 90,
+};
+function spelledNumbers(s: string): string[] {
+  const out: string[] = [];
+  const words = s.toLowerCase().split(/[^a-z]+/);
+  words.forEach((w, i) => {
+    if (!(w in SPELLED)) return;
+    out.push(String(SPELLED[w]));
+    // "twenty five" / "twenty-five" -> 25
+    if (SPELLED[w] >= 20 && SPELLED[words[i + 1]] < 10) out.push(String(SPELLED[w] + SPELLED[words[i + 1]]));
+  });
+  return out;
+}
+
 /**
  * Keep only points the article actually supports:
  * - the evidence sentence must appear (after normalizing) in the source text;
- * - every number in the point's wording must also appear in its evidence,
- *   so the model can't invent or round a figure.
+ * - every number in the point's wording must also appear in its evidence (as digits or spelled
+ *   out), so the model can't invent or round a figure.
  */
 export function verifyPoints(points: CandidatePoint[], sourceText: string): VerifyResult {
   const source = matchKey(sourceText);
   const result: VerifyResult = { kept: [], dropped: [] };
 
   for (const point of points) {
-    const evidence = matchKey(point.evidence);
-    if (evidence.length < 20) {
-      result.dropped.push({ point, reason: "evidence too short" });
+    // Methods are often spread over a few sentences, which the model joins with "...": each piece
+    // must be in the article word for word, like the study setting. Testing (Margalit, Student):
+    // 6 of 15 points, most of the method points, were dropped when only one whole sentence counted.
+    const pieces = point.evidence.split(/\.{3}|…/).map(matchKey).filter(Boolean);
+    const evidence = pieces.join(" ");
+    if (evidence.length < 20 || pieces.length > MAX_EVIDENCE_PIECES || pieces.some((p) => p.length < 20)) {
+      result.dropped.push({ point, reason: pieces.length > MAX_EVIDENCE_PIECES ? "evidence too long" : "evidence too short" });
       continue;
     }
-    if (!source.includes(evidence)) {
+    if (pieces.some((p) => !foundInSource(p, source))) {
       result.dropped.push({ point, reason: "evidence not found in article" });
       continue;
     }
-    const evidenceNumbers = new Set(numbersIn(evidence));
+    const evidenceNumbers = new Set([...numbersIn(evidence), ...spelledNumbers(evidence)]);
     const missing = numbersIn(point.text).filter((n) => !evidenceNumbers.has(n));
     if (missing.length) {
       result.dropped.push({ point, reason: `number(s) ${missing.join(", ")} not in its evidence sentence` });
@@ -118,7 +199,7 @@ export function verifySetting(
     // must be in the article word for word. (Testing: Beath's "2007 to 2011" came from three survey dates.)
     const pieces = (fact?.evidence ?? "").split(/\.{3}|…/).map(matchKey).filter(Boolean);
     const evidence = pieces.join(" ");
-    if (!value || evidence.length < 20 || pieces.some((p) => p.length < 20 || !source.includes(p))) return undefined;
+    if (!value || evidence.length < 20 || pieces.some((p) => p.length < 20 || !foundInSource(p, source))) return undefined;
     const evidenceNumbers = new Set(numbersIn(evidence));
     if (numbersIn(value).some((n) => !evidenceNumbers.has(n))) return undefined;
     const names = value.match(/\b[A-Z][a-zA-Z]+/g) ?? [];

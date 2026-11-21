@@ -5,7 +5,8 @@ import type { Word } from "./jobs";
 // The one-pager asks for "slightly faster than natural" pacing; 1.1 sounded right in the spike.
 const SPEED = 1.1;
 
-export async function textToSpeech(text: string): Promise<Buffer> {
+/** speed: 1.1 for Social reels; Student videos use a calmer 1.0 (lengthFor in script-checks). */
+export async function textToSpeech(text: string, speed = SPEED): Promise<Buffer> {
   const res = await fetch("https://api.openai.com/v1/audio/speech", {
     method: "POST",
     headers: { Authorization: `Bearer ${openaiKey()}`, "Content-Type": "application/json" },
@@ -13,7 +14,7 @@ export async function textToSpeech(text: string): Promise<Buffer> {
       model: "tts-1",
       voice: process.env.OPENAI_TTS_VOICE || "nova",
       input: text,
-      speed: SPEED,
+      speed,
       response_format: "mp3",
     }),
   });

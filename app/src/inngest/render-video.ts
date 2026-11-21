@@ -4,8 +4,11 @@ import { inngest, VOICE_READY, type VoiceReadyData } from "./client";
 import { supabaseAdmin } from "@/lib/supabase/server";
 import { setJob, MEDIA_BUCKET } from "@/lib/supabase/jobs-db";
 import { searchPhotosCached, searchVideosCached } from "@/lib/pixabay";
-import { cleanQuery, downloadMedia, photoCandidates, pickShotMedia, placeSearchWords, type PhotoHit } from "@/lib/pixabay-api";
-import { pickPhoto } from "@/lib/openai";
+import { downloadMedia, pickShotMedia } from "@/lib/pixabay-api";
+import { choosePopupPhoto } from "./footage";
+import { saveTokens } from "@/lib/usage-db";
+import type { TokenUsage } from "@/lib/pricing";
+import { buildMapScene, findCountry, periodLabel, placeNames } from "@/render/map";
 import {
   BOTTOM_LEAD_S,
   buildCompositionHtml,
@@ -14,25 +17,39 @@ import {
   HYPERFRAMES_JSON,
   LOOP_LEAD_S,
   planBottomShots,
+  HALF_PX,
+  planMap,
   planMusic,
   planPopups,
+  planSfx,
   planShots,
+  type SfxKind,
   withLoopEnding,
   type BottomSource,
   type CompositionExtras,
 } from "@/render/composition";
 import { probeDuration, projectDir, readRenderStatus, startRender, VIDEO_FILE, writeProject } from "@/render/local";
 import { downloadLibraryFile, listGameplay, listMusic, pickFor, trackCredit } from "@/lib/library";
-import type { AddonMedia, Addons, BrollImage, PopupMedia, Script, Segment, StudySetting } from "@/lib/jobs";
+import {
+  resolveAddons,
+  type AddonMedia,
+  type Addons,
+  type BrollImage,
+  type PopupMedia,
+  type PreparedPopup,
+  type Script,
+  type Segment,
+  type StudySetting,
+} from "@/lib/jobs";
 
 /** Split-screen "satisfying" footage: Pixabay searches that tested well (long clips, matching tags). */
 const SATISFYING_QUERIES = ["marble run", "pottery wheel", "skateboarding", "snowboard", "roller coaster", "toy car racing"];
 const SATISFYING_PIECE_S = 12;
 
-/** Add-on choices; {} for jobs (or databases) from before migration 0005. */
+/** Add-on choices; popups/sfx/map default on when missing (jobs from before migration 0005, or never saved). */
 async function readAddons(jobId: string): Promise<Addons> {
   const { data, error } = await supabaseAdmin().from("jobs").select("addons").eq("id", jobId).single();
-  return error ? {} : ((data?.addons ?? {}) as Addons);
+  return resolveAddons(error ? null : ((data?.addons ?? null) as Addons | null));
 }
 
 async function readAddonMedia(jobId: string): Promise<AddonMedia> {
@@ -40,54 +57,45 @@ async function readAddonMedia(jobId: string): Promise<AddonMedia> {
   return error ? {} : ((data?.addon_media ?? {}) as AddonMedia);
 }
 
-/** At most this many AI photo checks per pop-up (one per search tried). */
-const MAX_PHOTO_CHECKS = 2;
+/** Where the map's country ends up on screen (px from the top): below the captions, above the Reels UI. */
+const MAP_FOCUS_Y = 1420;
+
+/** A sound effect: the user's own from library/sfx/<kind>.mp3 if uploaded, else the built-in one. */
+async function sfxFile(kind: SfxKind): Promise<Buffer> {
+  try {
+    return await downloadLibraryFile(`sfx/${kind}.mp3`);
+  } catch {
+    return readFile(path.join(process.cwd(), "assets", "sfx", `${kind}.mp3`));
+  }
+}
 
 /**
- * Pop-up photos: time each beat's pop-up word first (so no photo is fetched for a slot that can't
- * be shown), then search Pixabay, most specific first: the study's place + the search ("afghanistan
- * village"), the search, the word. Real photos whose tags strictly match go to a vision model,
- * which picks the one that fits the word and the study's setting, or rejects them all.
- * Testing (tags only): a Bavarian church for "villages" in Afghanistan, a Christmas scene for
- * "household income". A pop-up without a good photo is skipped. Never fails the video.
+ * Pop-up photos: time each beat's pop-up word first (so no photo is used for a slot that can't be
+ * shown). Each slot uses the photo picked while the voice was recorded (footage.ts), if it is for
+ * the same word and not already a shot; otherwise it is picked now. A pop-up without a good photo
+ * is skipped. Never fails the video.
  */
 async function pickPopups(
   jobId: string,
   segments: Segment[],
   usedPhotos: Set<number>,
   place: string | undefined,
+  busy: [number, number][],
+  prepared: PreparedPopup[],
+  /** Photo checks done here (pop-ups not prepared during the recording) add their tokens here. */
+  checks: TokenUsage[],
 ): Promise<PopupMedia[]> {
   const requests = segments.flatMap((s, segment) => (s.kind === "beat" && s.popup ? [{ segment, word: s.popup.word }] : []));
-  const slots = planPopups(buildTimeline(segments), requests);
-  const where = placeSearchWords(place);
+  const slots = planPopups(buildTimeline(segments), requests, busy);
   const out: PopupMedia[] = [];
   for (const slot of slots) {
     const seg = segments[slot.segment];
     const popup = seg.popup!;
     try {
-      let hit: PhotoHit | undefined;
-      let query = "";
-      let checks = 0;
-      const searches = [where && `${where} ${popup.query}`, popup.query, popup.word].map((q) => cleanQuery(q || ""));
-      for (const q of [...new Set(searches.filter(Boolean))]) {
-        const candidates = photoCandidates(await searchPhotosCached(q), q, usedPhotos);
-        if (!candidates.length) continue;
-        if (checks >= MAX_PHOTO_CHECKS) break;
-        checks++;
-        try {
-          const pick = await pickPhoto({ word: popup.word, sentence: seg.text, place, imageUrls: candidates.map((c) => c.webformatURL!) });
-          console.log(`[render-video] pop-up "${popup.word}" / "${q}": ${pick.index < 0 ? "none fit" : `photo ${pick.index + 1}`} (${pick.reason})`);
-          if (pick.index < 0) continue;
-          hit = candidates[pick.index];
-        } catch (e) {
-          // Without the check, fall back to the best tag match rather than lose the pop-up.
-          console.warn(`[render-video] photo check failed for "${popup.word}": ${e instanceof Error ? e.message : e}`);
-          hit = candidates[0];
-        }
-        query = q;
-        break;
-      }
-      if (!hit) continue;
+      const ready = prepared.find((p) => p.segment === slot.segment && p.word === popup.word && !usedPhotos.has(p.photo.id));
+      const pick = ready ? { hit: ready.photo, query: ready.query } : await choosePopupPhoto(seg, place, usedPhotos, checks);
+      if (!pick) continue;
+      const { hit, query } = pick;
       usedPhotos.add(hit.id);
       const imagePath = `${jobId}/popup-${out.length}.jpg`;
       const image = await downloadMedia(hit.largeImageURL, "image");
@@ -217,16 +225,30 @@ export const renderVideo = inngest.createFunction(
             : [],
         );
       }
+      // The study's place drives the map and makes pop-up photo searches specific (migration 0007;
+      // a missing column just means no place).
+      const { data: s } = await supabaseAdmin().from("jobs").select("study_setting").eq("id", jobId).single();
+      const setting = (s?.study_setting ?? null) as StudySetting | null;
+      const place = setting?.place?.value;
+
+      if (addons.map) {
+        const country = findCountry(place);
+        // The country and the place's own names ("Java", "Delhi"): the script may say either.
+        const slot = country ? planMap(buildTimeline(segments), [...country.words, ...placeNames(place)]) : null;
+        if (country && slot) {
+          addonMedia.map = { country: country.name, label: country.label, period: periodLabel(setting?.period?.value), ...slot };
+        }
+      }
       if (addons.popups) {
         const usedPhotos = new Set(picks.filter((p) => p.kind === "image").map((p) => p.hit.id));
-        // The study's place makes searches and the photo check specific (column from migration 0007).
-        const { data: s } = await supabaseAdmin().from("jobs").select("study_setting").eq("id", jobId).single();
-        const place = (s?.study_setting as StudySetting | null)?.place?.value;
-        addonMedia.popups = await pickPopups(jobId, segments, usedPhotos, place);
+        const busy: [number, number][] = addonMedia.map ? [[addonMedia.map.start, addonMedia.map.end]] : [];
+        const prepared = (await readAddonMedia(jobId)).preparedPopups ?? [];
+        const checks: TokenUsage[] = [];
+        addonMedia.popups = await pickPopups(jobId, segments, usedPhotos, place, busy, prepared, checks);
+        await saveTokens(jobId, "footage:checks", checks);
       }
-      if (addonMedia.music || addonMedia.bottom?.length || addonMedia.popups?.length) {
-        await setJob(jobId, { addon_media: addonMedia });
-      }
+      // Always written: it also replaces the pop-ups prepared while the voice was recorded.
+      await setJob(jobId, { addon_media: addonMedia });
 
       return {
         shots: broll.length,
@@ -234,6 +256,7 @@ export const renderVideo = inngest.createFunction(
         music: addonMedia.music?.path ?? null,
         bottom: addonMedia.bottom?.length ?? 0,
         popups: addonMedia.popups?.map((p) => `${p.word} @ ${p.start}s (${p.query})`) ?? [],
+        map: addonMedia.map ? `${addonMedia.map.label} ${addonMedia.map.period} @ ${addonMedia.map.start}s` : null,
       };
     });
 
@@ -324,12 +347,35 @@ export const renderVideo = inngest.createFunction(
         popups.push({ file, start: p.start, end: p.end, side: p.side, place: p.place });
       }
 
+      // Map intro: drawn now from the saved country; on split screen it covers the bottom half.
+      let map: CompositionExtras["map"];
+      if (addonMedia.map) {
+        const m = addonMedia.map;
+        const scene = bottom ? buildMapScene(m.country, HALF_PX, MAP_FOCUS_Y - HALF_PX) : buildMapScene(m.country, 1920, MAP_FOCUS_Y);
+        map = { ...scene, start: m.start, end: m.end, label: m.period ? `${m.label} · ${m.period}` : m.label };
+      }
+
+      // Sound effects, timed to the final pop-ups, callouts, beats and map.
+      let sfx: CompositionExtras["sfx"];
+      const addons = await readAddons(jobId);
+      if (addons.sfx) {
+        const cues = planSfx(timeline, popups, map);
+        const files: Partial<Record<SfxKind, string>> = {};
+        for (const kind of new Set(cues.map((c) => c.kind))) {
+          files[kind] = `assets/sfx-${kind}.mp3`;
+          extraFiles.push({ path: files[kind], content: await sfxFile(kind) });
+        }
+        sfx = { files, cues };
+      }
+
       const html = buildCompositionHtml(timeline, withMedia, {
         hookTitle: script?.hookTitle,
         credit: script?.sourceCredit,
         bottom,
         music,
         popups,
+        map,
+        sfx,
       });
 
       const dir = await writeProject(jobId, [
@@ -347,6 +393,8 @@ export const renderVideo = inngest.createFunction(
         music: !!music,
         bottomShots: bottom?.length ?? 0,
         popups: popups.length,
+        map: !!map,
+        sfx: sfx?.cues.map((c) => `${c.kind}@${c.start}`) ?? [],
       };
     });
 

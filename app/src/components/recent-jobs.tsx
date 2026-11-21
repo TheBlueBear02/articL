@@ -3,8 +3,7 @@
 import { useEffect, useState } from "react";
 import Link from "next/link";
 import { supabaseBrowser } from "@/lib/supabase/browser";
-import { SETTLED_STATUSES, type JobStatus } from "@/lib/jobs";
-import { STATUS_LABEL } from "./job-view";
+import { AUDIENCE_LABEL, audienceOf, SETTLED_STATUSES, STATUS_LABEL, type JobStatus } from "@/lib/jobs";
 import { formatDuration, jobTiming, type StageTimes } from "@/lib/timing";
 
 type JobRow = {
@@ -16,6 +15,7 @@ type JobRow = {
   total_duration_s: number | null;
   file_path: string;
   stage_times?: StageTimes | null;
+  audience?: string | null;
 };
 
 const COLUMNS = "id, original_filename, status, created_at, updated_at, total_duration_s, file_path";
@@ -57,8 +57,9 @@ export function RecentJobs() {
         .order("created_at", { ascending: false })
         .limit(LIMIT);
     const load = async () => {
-      let res = await query(`${COLUMNS}, stage_times`);
-      // Before migration 0006 there is no stage_times column; show the list without timings.
+      let res = await query(`${COLUMNS}, stage_times, audience`);
+      // Before migrations 0006 / 0008 those columns are missing; show the list without them.
+      if (res.error && /audience/.test(res.error.message)) res = await query(`${COLUMNS}, stage_times`);
       if (res.error && /stage_times/.test(res.error.message)) res = await query(COLUMNS);
       if (cancelled) return;
       if (res.error) setLoadError(res.error.message);
@@ -106,7 +107,7 @@ export function RecentJobs() {
                 <span className="min-w-0">
                   <span className="block truncate text-sm font-medium">{j.original_filename}</span>
                   <span className="block text-xs text-neutral-500 dark:text-neutral-400">
-                    {when(j.created_at)}
+                    {when(j.created_at)} · {AUDIENCE_LABEL[audienceOf(j)]}
                     {j.status === "rendered" && j.total_duration_s != null && ` · ${Math.round(j.total_duration_s)} s video`}
                     {madeIn(j) && ` · ${j.status === "failed" ? "ran" : "made in"} ${madeIn(j)}`}
                   </span>

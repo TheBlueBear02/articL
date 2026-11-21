@@ -2,6 +2,7 @@ import { supabaseAdmin } from "@/lib/supabase/server";
 import { ARTICLE_UPLOADED } from "@/inngest/client";
 import { sendJobEvent } from "@/inngest/send";
 import { checkPastedText, cleanText, countWords, MAX_TITLE_CHARS } from "@/lib/text";
+import { audienceColumn, parseAudience } from "@/lib/audience-input";
 
 // Create a job from pasted article text instead of a PDF. The text is stored right away and
 // the same background job runs from the points step on. A pasted-text job is recognised by
@@ -14,6 +15,8 @@ export async function POST(request: Request) {
   const text = cleanText(rawText);
   const problem = checkPastedText(text);
   if (problem) return Response.json({ error: problem }, { status: 400 });
+  const parsed = parseAudience(body?.audience);
+  if ("error" in parsed) return Response.json({ error: parsed.error }, { status: 400 });
 
   // The script step takes the article's first line as its title, so put the title first.
   const extracted = title ? `${title}\n\n${text}` : text;
@@ -27,6 +30,7 @@ export async function POST(request: Request) {
     file_path: "",
     extracted_text: extracted,
     word_count: countWords(extracted),
+    ...audienceColumn(parsed.audience),
   });
   if (error) return Response.json({ error: `Could not create job: ${error.message}` }, { status: 500 });
 

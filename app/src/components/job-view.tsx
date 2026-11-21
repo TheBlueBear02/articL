@@ -1,199 +1,141 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, type CSSProperties, type ReactNode } from "react";
 import { supabaseBrowser } from "@/lib/supabase/browser";
 import { readJson } from "@/lib/api-client";
-import { formatDuration, jobTiming, type StepTiming } from "@/lib/timing";
+import { formatDuration, jobTiming } from "@/lib/timing";
+import { formatCost, formatUsage, usageByStep } from "@/lib/pricing";
 import {
-  MAX_SELECTED_POINTS,
   SETTLED_STATUSES,
   type CandidatePoint,
   type Job,
   type JobStatus,
-  type PointType,
   MUSIC_MOODS,
   SPLIT_STYLES,
   type Addons,
-  type AddonMedia,
   type LibraryInfo,
   type MusicMood,
   type SplitStyle,
   type Script,
   type Segment,
-  type BrollImage,
+  AUDIENCE_LABEL,
+  audienceOf,
+  STATUS_LABEL,
+  DEFAULT_ADDONS,
+  resolveAddons,
 } from "@/lib/jobs";
+import { JobMediaPanel, ReelPanel } from "@/components/job-media-panel";
 
-export const STATUS_LABEL: Record<JobStatus, string> = {
-  awaiting_upload: "Uploading…",
-  uploaded: "Uploaded, waiting to start…",
-  extracting: "Extracting text…",
-  extracted: "Text extracted",
-  proposing: "Finding key points…",
-  awaiting_selection: "Pick up to 5 points",
-  points_selected: "Points saved",
-  scripting: "Writing the script…",
-  voicing: "Recording the voiceover…",
-  voiced: "Voiceover ready",
-  fetching_broll: "Finding b-roll images…",
-  rendering: "Rendering the video…",
-  rendered: "Video ready",
-  failed: "Failed",
-};
+export type JobViewMode = "production" | "test";
+
+/** Re-export for older imports. */
+export { STATUS_LABEL };
+
+/** Reading the article and finding points: add-ons can be chosen meanwhile. */
+const EARLY_STATUSES: JobStatus[] = ["awaiting_upload", "uploaded", "extracting", "extracted", "proposing", "awaiting_selection"];
 
 const IN_PRODUCTION: JobStatus[] = ["points_selected", "scripting", "voicing", "voiced", "fetching_broll", "rendering"];
 
-const TYPE_STYLE: Record<PointType, string> = {
-  stat: "bg-sky-100 text-sky-900 dark:bg-sky-900/40 dark:text-sky-200",
-  quote: "bg-violet-100 text-violet-900 dark:bg-violet-900/40 dark:text-violet-200",
-  claim: "bg-emerald-100 text-emerald-900 dark:bg-emerald-900/40 dark:text-emerald-200",
-};
+type ProgressStep = { key: string; label: string };
 
-function TypeBadge({ type }: { type: PointType }) {
-  return (
-    <span className={`rounded px-1.5 py-0.5 text-xs font-semibold uppercase tracking-wide ${TYPE_STYLE[type]}`}>
-      {type}
-    </span>
-  );
-}
+/** Full pipeline shown in Production: early article steps, then video production. */
+const PROGRESS_STEPS: ProgressStep[] = [
+  { key: "upload", label: "Upload" },
+  { key: "read", label: "Read article" },
+  { key: "points", label: "Find points" },
+  { key: "script", label: "Write script" },
+  { key: "voice", label: "Record voice" },
+  { key: "footage", label: "Find visual materials" },
+  { key: "render", label: "Render video" },
+];
 
-const STEPS = ["Write script", "Record voice", "Find b-roll", "Render video"];
+/** Index of the step that is currently running (or next to start). */
 const STEP_OF: Partial<Record<JobStatus, number>> = {
-  points_selected: 0,
-  scripting: 0,
-  voicing: 1,
-  voiced: 2,
-  fetching_broll: 2,
-  rendering: 3,
+  awaiting_upload: 0,
+  uploaded: 1,
+  extracting: 1,
+  extracted: 1,
+  proposing: 2,
+  awaiting_selection: 3,
+  points_selected: 3,
+  scripting: 3,
+  voicing: 4,
+  voiced: 5,
+  fetching_broll: 5,
+  rendering: 6,
+  rendered: 7,
 };
 
-function ProgressSteps({ status, renderProgress }: { status: JobStatus; renderProgress: number | null }) {
-  const current = STEP_OF[status] ?? 0;
-  return (
-    <div>
-      <ol className="mt-2 flex flex-wrap gap-x-4 gap-y-1 text-sm">
-        {STEPS.map((label, i) => (
-          <li key={label} className={i === current ? "font-semibold" : i < current ? "text-emerald-600" : "text-neutral-400"}>
-            {i < current ? "✓ " : i === current ? "● " : "○ "}
-            {label}
-          </li>
-        ))}
-      </ol>
-      {status === "rendering" && (
-        <div className="mt-3">
-          <div className="h-2 w-full overflow-hidden rounded bg-neutral-200 dark:bg-neutral-800">
-            <div className="h-full bg-yellow-400 transition-all" style={{ width: `${renderProgress ?? 0}%` }} />
-          </div>
-          <p className="mt-1 text-xs text-neutral-500 dark:text-neutral-400">
-            {renderProgress ?? 0}% · rendering on this computer usually takes about 4 minutes
-          </p>
-        </div>
-      )}
-    </div>
-  );
-}
-
-/** Text to paste under the video when posting, with a copy button. */
-function PostCaption({ text }: { text: string }) {
-  const [copied, setCopied] = useState(false);
-  async function copy() {
-    try {
-      await navigator.clipboard.writeText(text);
-      setCopied(true);
-      setTimeout(() => setCopied(false), 2000);
-    } catch {
-      setCopied(false);
-    }
-  }
-  return (
-    <div className="mt-5 max-w-sm">
-      <div className="flex items-center justify-between">
-        <h3 className="text-sm font-semibold">Post caption</h3>
-        <button onClick={copy} className="rounded-md border border-neutral-300 px-3 py-1 text-xs dark:border-neutral-700">
-          {copied ? "Copied" : "Copy"}
-        </button>
-      </div>
-      <p className="mt-2 whitespace-pre-wrap rounded-lg bg-neutral-100 p-3 text-sm dark:bg-neutral-900">{text}</p>
-    </div>
-  );
-}
-
-function VideoPanel({
-  jobId,
-  broll,
-  postCaption,
-  addonMedia,
+/** One row per pipeline step: green when done, in-row progress bar while that step runs. */
+function ProgressSteps({
+  status,
+  renderProgress,
+  pastedText,
 }: {
-  jobId: string;
-  broll: BrollImage[] | null;
-  postCaption?: string;
-  addonMedia?: AddonMedia | null;
+  status: JobStatus;
+  renderProgress: number | null;
+  /** Pasted-text jobs have no PDF upload/read. */
+  pastedText?: boolean;
 }) {
-  // Top-half footage, pop-up photos, and any Pixabay clips in the split screen's bottom half.
-  const credits = [
-    ...(broll ?? []).map((b) => ({ user: b.user, pageURL: b.pageURL, pixabayId: b.pixabayId })),
-    ...(addonMedia?.popups ?? []).map((p) => ({ user: p.user, pageURL: p.pageURL, pixabayId: p.pixabayId })),
-    ...(addonMedia?.bottom ?? [])
-      .filter((c) => c.source === "pixabay" && c.user && c.pageURL)
-      .map((c) => ({ user: c.user!, pageURL: c.pageURL!, pixabayId: c.pixabayId ?? 0 })),
-  ];
-  const [links, setLinks] = useState<{ url: string; downloadUrl: string } | null>(null);
-  const [loadError, setLoadError] = useState<string | null>(null);
-
-  useEffect(() => {
-    fetch(`/api/jobs/${jobId}/video`)
-      .then(readJson)
-      .then((body) => setLinks(body as unknown as { url: string; downloadUrl: string }))
-      .catch((e) => setLoadError(e instanceof Error ? e.message : String(e)));
-  }, [jobId]);
+  const steps = pastedText
+    ? PROGRESS_STEPS.filter((s) => s.key !== "upload").map((s) =>
+        s.key === "read" ? { ...s, label: "Prepare text" } : s,
+      )
+    : PROGRESS_STEPS;
+  // Pasted jobs drop "upload", so indices after it shift by -1 vs STEP_OF.
+  const raw = STEP_OF[status] ?? 0;
+  const current = pastedText ? Math.max(0, raw - 1) : raw;
+  const failed = status === "failed";
 
   return (
-    <div className="mt-6">
-      <h2 className="text-lg font-semibold">Your reel</h2>
-      {loadError && <p className="mt-2 text-sm text-red-600">{loadError}</p>}
-      {links && (
-        <>
-          <video
-            // Loops like Reels/TikTok do, to check the seamless ending. No "#t=0.5" start offset: the
-            // opening frame (hook title) is a fine preview, and an offset would skip it on every replay.
-            src={links.url}
-            controls
-            loop
-            playsInline
-            preload="auto"
-            className="mt-3 aspect-[9/16] w-full max-w-sm rounded-lg bg-black"
-          />
-          <a
-            href={links.downloadUrl}
-            className="mt-3 inline-block rounded-md bg-yellow-400 px-5 py-2 font-semibold text-neutral-900"
+    <ol className="mt-3 space-y-2">
+      {steps.map((step, i) => {
+        const done = current > i;
+        const active = !failed && current === i;
+        const pct =
+          active && status === "rendering" ? Math.min(100, Math.max(0, renderProgress ?? 0)) : active ? null : done ? 100 : 0;
+
+        return (
+          <li
+            key={step.key}
+            className="min-w-0 rounded-lg border border-neutral-300 px-3 py-3 dark:border-neutral-700"
           >
-            Download MP4
-          </a>
-        </>
-      )}
-      {postCaption && <PostCaption text={postCaption} />}
-      {credits.length > 0 && (
-        <p className="mt-3 text-xs text-neutral-500 dark:text-neutral-400">
-          Footage from Pixabay:{" "}
-          {/* One credit per creator; each links to one of their clips or photos used here. */}
-          {credits
-            .filter((b, i) => credits.findIndex((x) => x.user === b.user) === i)
-            .map((b, i) => (
-              <span key={`${b.pixabayId}-${i}`}>
-                {i > 0 && ", "}
-                <a href={b.pageURL} target="_blank" rel="noreferrer" className="underline underline-offset-2">
-                  {b.user}
-                </a>
+            <div className="mb-2 flex items-center justify-between gap-2">
+              <span
+                className={`truncate text-sm font-medium ${
+                  done
+                    ? "text-emerald-700 dark:text-emerald-300"
+                    : active
+                      ? "text-neutral-900 dark:text-neutral-100"
+                      : "text-neutral-400 dark:text-neutral-500"
+                }`}
+              >
+                {step.label}
               </span>
-            ))}
-        </p>
-      )}
-      {addonMedia?.music && (
-        <p className="mt-1 text-xs text-neutral-500 dark:text-neutral-400">
-          Music: {addonMedia.music.title}
-          {addonMedia.music.artist && ` by ${addonMedia.music.artist}`}
-        </p>
-      )}
-    </div>
+              {done ? (
+                <span className="shrink-0 text-sm font-medium text-emerald-700 dark:text-emerald-300" aria-label="Done">
+                  ✓
+                </span>
+              ) : active && status === "rendering" ? (
+                <span className="shrink-0 text-xs tabular-nums text-neutral-500">{pct}%</span>
+              ) : null}
+            </div>
+            <div className="h-2 w-full overflow-hidden rounded-full bg-neutral-200 dark:bg-neutral-800">
+              {done ? (
+                <div className="h-full w-full rounded-full bg-emerald-500" />
+              ) : active && status === "rendering" ? (
+                <div
+                  className="h-full rounded-full bg-brand transition-[width] duration-300 ease-out"
+                  style={{ width: `${pct}%` }}
+                />
+              ) : active ? (
+                <div className="h-full w-1/3 animate-pulse rounded-full bg-brand" />
+              ) : null}
+            </div>
+          </li>
+        );
+      })}
+    </ol>
   );
 }
 
@@ -251,7 +193,7 @@ function VoiceoverPanel({
       <button
         onClick={playingAll ? stopAll : playAll}
         disabled={!urls}
-        className="mt-3 rounded-md bg-yellow-400 px-5 py-2 font-semibold text-neutral-900 disabled:opacity-40"
+        className="mt-3 rounded-md bg-brand px-5 py-2 font-semibold text-neutral-900 disabled:opacity-40"
       >
         {playingAll ? "Stop" : "▶ Play all"}
       </button>
@@ -306,8 +248,18 @@ function VoiceoverPanel({
 const MUSIC_LABEL: Record<MusicMood, string> = { calm: "Calm", upbeat: "Upbeat", dramatic: "Dramatic" };
 const SPLIT_LABEL: Record<SplitStyle, string> = { gameplay: "Gameplay", satisfying: "Satisfying clips" };
 
-/** Optional extras, chosen next to Continue. Choices without library files are shown but disabled. */
-function AddonsPicker({ value, onChange }: { value: Addons; onChange: (a: Addons) => void }) {
+/** Optional extras. Compact layout for the controls column; choices without library files are disabled. */
+function AddonsPicker({
+  value,
+  onChange,
+  title = "Add-ons",
+  children,
+}: {
+  value: Addons;
+  onChange: (a: Addons) => void;
+  title?: string;
+  children?: ReactNode;
+}) {
   const [lib, setLib] = useState<LibraryInfo | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
 
@@ -318,19 +270,23 @@ function AddonsPicker({ value, onChange }: { value: Addons; onChange: (a: Addons
       .catch((e) => setLoadError(e instanceof Error ? e.message : String(e)));
   }, []);
 
-  const chip = (on: boolean, disabled: boolean) =>
-    `rounded-full border px-3 py-1 text-sm ${
-      on ? "border-yellow-400 bg-yellow-400 font-semibold text-neutral-900" : "border-neutral-300 dark:border-neutral-700"
+  const btn = (on: boolean, disabled: boolean) =>
+    `min-w-0 rounded-sm border px-1.5 py-2 text-center text-xs leading-tight ${
+      on ? "border-brand bg-brand font-semibold text-neutral-900" : "border-neutral-300 bg-white dark:border-neutral-700 dark:bg-neutral-950"
     } ${disabled ? "cursor-not-allowed opacity-40" : "cursor-pointer"}`;
 
+  const rowStyle = (count: number): CSSProperties => ({
+    gridTemplateColumns: `repeat(${count}, minmax(0, 1fr))`,
+  });
+
   return (
-    <div className="mt-5 rounded-lg border border-neutral-300 p-4 dark:border-neutral-700">
-      <h3 className="font-semibold">Add-ons</h3>
+    <div className="min-h-0">
+      <h3 className="text-sm font-semibold tracking-tight">{title}</h3>
       {loadError && <p className="mt-1 text-xs text-red-600">Couldn&apos;t load the library: {loadError}</p>}
 
-      <p className="mt-3 text-sm text-neutral-600 dark:text-neutral-400">Background music</p>
-      <div className="mt-1 flex flex-wrap gap-2">
-        <button type="button" className={chip(!value.music, false)} onClick={() => onChange({ ...value, music: undefined })}>
+      <p className="mt-3 text-xs text-neutral-600 dark:text-neutral-400">Background music</p>
+      <div className="mt-1 grid gap-1.5" style={rowStyle(1 + MUSIC_MOODS.length)}>
+        <button type="button" className={btn(!value.music, false)} onClick={() => onChange({ ...value, music: undefined })}>
           Off
         </button>
         {MUSIC_MOODS.map((m) => {
@@ -341,7 +297,7 @@ function AddonsPicker({ value, onChange }: { value: Addons; onChange: (a: Addons
               type="button"
               disabled={disabled}
               title={disabled ? "No tracks for this mood in the library yet" : undefined}
-              className={chip(value.music === m, disabled)}
+              className={btn(value.music === m, disabled)}
               onClick={() => onChange({ ...value, music: m })}
             >
               {MUSIC_LABEL[m]}
@@ -350,11 +306,11 @@ function AddonsPicker({ value, onChange }: { value: Addons; onChange: (a: Addons
         })}
       </div>
 
-      <p className="mt-4 text-sm text-neutral-600 dark:text-neutral-400">Split screen (bottom half)</p>
-      <div className="mt-1 flex flex-wrap gap-2">
+      <p className="mt-3 text-xs text-neutral-600 dark:text-neutral-400">Split screen</p>
+      <div className="mt-1 grid gap-1.5" style={rowStyle(1 + SPLIT_STYLES.length)}>
         <button
           type="button"
-          className={chip(!value.split, false)}
+          className={btn(!value.split, false)}
           onClick={() => onChange({ ...value, split: undefined, gameplayClip: undefined })}
         >
           Off
@@ -367,7 +323,7 @@ function AddonsPicker({ value, onChange }: { value: Addons; onChange: (a: Addons
               type="button"
               disabled={disabled}
               title={disabled ? "No gameplay clips in the library yet" : undefined}
-              className={chip(value.split === s, disabled)}
+              className={btn(value.split === s, disabled)}
               onClick={() => onChange({ ...value, split: s, gameplayClip: s === "gameplay" ? value.gameplayClip : undefined })}
             >
               {SPLIT_LABEL[s]}
@@ -376,85 +332,136 @@ function AddonsPicker({ value, onChange }: { value: Addons; onChange: (a: Addons
         })}
       </div>
 
-      <p className="mt-4 text-sm text-neutral-600 dark:text-neutral-400">
-        Pop-up images (a small photo pops up when something picturable is said)
-      </p>
-      <div className="mt-1 flex flex-wrap gap-2">
-        <button type="button" className={chip(!value.popups, false)} onClick={() => onChange({ ...value, popups: undefined })}>
-          Off
-        </button>
-        <button type="button" className={chip(!!value.popups, false)} onClick={() => onChange({ ...value, popups: true })}>
+      {value.split === "gameplay" && lib && lib.gameplayClips.length > 0 && (
+        <div className="mt-2 grid grid-cols-3 gap-1.5">
+          <button
+            type="button"
+            onClick={() => onChange({ ...value, gameplayClip: undefined })}
+            className={`flex aspect-video items-center justify-center rounded-md border px-1 text-center text-[10px] leading-tight ${
+              !value.gameplayClip
+                ? "border-brand bg-brand/20 font-semibold"
+                : "border-neutral-300 dark:border-neutral-700"
+            }`}
+          >
+            Any
+          </button>
+          {lib.gameplayClips.map((c) => {
+            const on = value.gameplayClip === c.path;
+            return (
+              <button
+                key={c.path}
+                type="button"
+                title={c.name}
+                onClick={() => onChange({ ...value, gameplayClip: c.path })}
+                className={`overflow-hidden rounded-md border text-left ${
+                  on ? "border-brand" : "border-neutral-300 dark:border-neutral-700"
+                }`}
+              >
+                {c.previewUrl ? (
+                  <video
+                    // "#t=3" shows a frame from the action instead of a black first frame.
+                    src={`${c.previewUrl}#t=3`}
+                    muted
+                    loop
+                    playsInline
+                    preload="metadata"
+                    onMouseEnter={(e) => e.currentTarget.play().catch(() => {})}
+                    onMouseLeave={(e) => e.currentTarget.pause()}
+                    className="aspect-video w-full bg-black object-cover"
+                  />
+                ) : (
+                  <div className="aspect-video w-full bg-neutral-200 dark:bg-neutral-800" />
+                )}
+                <span className={`block truncate px-1 py-0.5 text-[10px] leading-tight ${on ? "font-semibold" : ""}`}>
+                  {c.name}
+                </span>
+              </button>
+            );
+          })}
+        </div>
+      )}
+
+      <p className="mt-3 text-xs text-neutral-600 dark:text-neutral-400">Pop-up images</p>
+      <div className="mt-1 grid gap-1.5" style={rowStyle(2)}>
+        <button type="button" className={btn(value.popups !== false, false)} onClick={() => onChange({ ...value, popups: true })}>
           On
+        </button>
+        <button type="button" className={btn(value.popups === false, false)} onClick={() => onChange({ ...value, popups: false })}>
+          Off
         </button>
       </div>
 
-      {value.split === "gameplay" && lib && lib.gameplayClips.length > 0 && (
-        <>
-          <p className="mt-4 text-sm text-neutral-600 dark:text-neutral-400">Which gameplay? (hover to preview)</p>
-          <div className="mt-2 grid grid-cols-2 gap-2 sm:grid-cols-3">
-            <button
-              type="button"
-              onClick={() => onChange({ ...value, gameplayClip: undefined })}
-              className={`flex aspect-video items-center justify-center rounded-lg border-2 text-sm ${
-                !value.gameplayClip ? "border-yellow-400 font-semibold" : "border-neutral-300 dark:border-neutral-700"
-              }`}
-            >
-              Any (pick for me)
+      {(
+        [
+          ["sfx", "Sound effects"],
+          ["map", "Map intro"],
+        ] as const
+      ).map(([key, label]) => (
+        <div key={key}>
+          <p className="mt-3 text-xs text-neutral-600 dark:text-neutral-400">{label}</p>
+          <div className="mt-1 grid gap-1.5" style={rowStyle(2)}>
+            <button type="button" className={btn(value[key] !== false, false)} onClick={() => onChange({ ...value, [key]: true })}>
+              On
             </button>
-            {lib.gameplayClips.map((c) => {
-              const on = value.gameplayClip === c.path;
-              return (
-                <button
-                  key={c.path}
-                  type="button"
-                  onClick={() => onChange({ ...value, gameplayClip: c.path })}
-                  className={`overflow-hidden rounded-lg border-2 text-left ${
-                    on ? "border-yellow-400" : "border-neutral-300 dark:border-neutral-700"
-                  }`}
-                >
-                  {c.previewUrl ? (
-                    <video
-                      // "#t=3" shows a frame from the action instead of a black first frame.
-                      src={`${c.previewUrl}#t=3`}
-                      muted
-                      loop
-                      playsInline
-                      preload="metadata"
-                      onMouseEnter={(e) => e.currentTarget.play().catch(() => {})}
-                      onMouseLeave={(e) => e.currentTarget.pause()}
-                      className="aspect-video w-full bg-black object-cover"
-                    />
-                  ) : (
-                    <div className="aspect-video w-full bg-neutral-200 dark:bg-neutral-800" />
-                  )}
-                  <span className={`block truncate px-2 py-1 text-xs ${on ? "font-semibold" : ""}`}>{c.name}</span>
-                </button>
-              );
-            })}
+            <button type="button" className={btn(value[key] === false, false)} onClick={() => onChange({ ...value, [key]: false })}>
+              Off
+            </button>
           </div>
-        </>
-      )}
-      {lib && (!lib.gameplay || MUSIC_MOODS.some((m) => !lib.music[m])) && (
-        <p className="mt-3 text-xs text-neutral-500 dark:text-neutral-400">
-          Greyed-out options need files in Supabase Storage → library (music/&lt;mood&gt;/ or gameplay/).
-        </p>
-      )}
+        </div>
+      ))}
+      {children}
     </div>
   );
 }
 
-const STEP_DOT: Record<StepTiming["state"], string> = {
-  done: "bg-green-500",
-  running: "bg-yellow-400 animate-pulse",
-  failed: "bg-red-500",
-  pending: "bg-neutral-300 dark:bg-neutral-700",
-  skipped: "bg-neutral-300 dark:bg-neutral-700",
+type AddonControls = {
+  value: Addons;
+  onChange: (a: Addons) => void;
+  saveState: "idle" | "saving" | "saved";
+  onSave: () => void;
 };
 
-/** Start-to-finish timer plus each step's duration, ticking live while the job works. */
-function TimingPanel({ job }: { job: Job }) {
+/** Middle column: add-ons (early statuses) and/or auto-chosen points while producing. */
+function JobControlsColumn({
+  addons,
+  pointsSection,
+}: {
+  addons?: AddonControls;
+  pointsSection?: ReactNode;
+}) {
+  if (!addons && !pointsSection) return null;
+
+  return (
+    <aside className="flex h-full min-h-[28rem] flex-col overflow-hidden rounded-2xl border border-neutral-200 bg-neutral-50/80 p-4 dark:border-neutral-800 dark:bg-neutral-900/50 lg:min-h-[32rem]">
+      <div className="min-h-0 flex-1 space-y-6 overflow-y-auto">
+        {addons && (
+          <AddonsPicker value={addons.value} onChange={addons.onChange} title="While you wait: add-ons">
+            <div className="mt-4">
+              <button
+                type="button"
+                onClick={addons.onSave}
+                disabled={addons.saveState !== "idle"}
+                className="w-full rounded-md bg-brand px-3 py-1.5 text-xs font-semibold text-neutral-900 disabled:opacity-40"
+              >
+                {addons.saveState === "saving" ? "Saving…" : addons.saveState === "saved" ? "Saved" : "Save add-ons"}
+              </button>
+              <p className="mt-1.5 text-[11px] leading-snug text-neutral-500 dark:text-neutral-400">
+                {addons.saveState === "saved"
+                  ? "Saved. Points are chosen automatically when ready."
+                  : "Saved with your choices if you leave this page."}
+              </p>
+            </div>
+          </AddonsPicker>
+        )}
+        {pointsSection}
+      </div>
+    </aside>
+  );
+}
+
+/** Start-to-finish timer plus each step's duration, tokens and cost — left sidebar in Test view. */
+function TimingSidebar({ job }: { job: Job }) {
   const [now, setNow] = useState<number | null>(null);
-  const [open, setOpen] = useState(true);
   const live = !["rendered", "failed"].includes(job.status);
 
   // Tick once a second while the job is still going (the clock is read in an effect, not during render).
@@ -467,70 +474,217 @@ function TimingPanel({ job }: { job: Job }) {
   }, [live]);
 
   const timing = now === null ? null : jobTiming(job.stage_times, job.status, now, job.file_path === "");
-  if (!timing) return null;
+  const usage = usageByStep(job.usage);
+  const costs = Object.values(usage).map((u) => u.cost);
+  const totalCost = costs.length && costs.every((c) => c !== null) ? costs.reduce((a, b) => a! + b!, 0) : null;
 
   return (
-    <div className="mt-4 rounded-lg border border-neutral-300 p-3 text-sm dark:border-neutral-700">
-      <button onClick={() => setOpen((o) => !o)} className="flex w-full items-center justify-between text-left">
-        <span className="font-semibold">
-          ⏱ {formatDuration(timing.processingSeconds)} processing
-          <span className="ml-2 font-normal text-neutral-500 dark:text-neutral-400">
-            · {formatDuration(timing.wallSeconds)} total incl. your choice
-          </span>
-        </span>
-        <span className="text-xs text-neutral-500">{open ? "Hide steps" : "Show steps"}</span>
-      </button>
-      {open && (
-        <ol className="mt-2 space-y-1">
-          {timing.steps.map((s) => (
-            <li
-              key={s.key}
-              className={`flex items-center justify-between ${s.user || s.state === "skipped" ? "text-neutral-500 dark:text-neutral-400" : ""}`}
-            >
-              <span className="flex items-center gap-2">
-                <span className={`inline-block h-2 w-2 rounded-full ${STEP_DOT[s.state]}`} />
-                {s.label}
-                {s.user && <span className="text-xs">(not counted)</span>}
-                {s.state === "skipped" && <span className="text-xs">(pasted text)</span>}
-                {s.state === "failed" && <span className="text-xs text-red-600">failed here</span>}
-              </span>
-              <span className={`tabular-nums ${s.state === "running" ? "font-semibold" : ""}`}>
-                {s.state === "skipped" ? "" : formatDuration(s.seconds)}
-              </span>
-            </li>
-          ))}
-        </ol>
+    <aside className="flex h-full min-h-[28rem] flex-col overflow-hidden rounded-2xl border border-neutral-200 bg-neutral-50/80 p-4 text-sm dark:border-neutral-800 dark:bg-neutral-900/50 lg:min-h-[32rem]">
+      <h2 className="shrink-0 text-sm font-semibold tracking-tight">Steps &amp; cost</h2>
+      {timing ? (
+        <>
+          <p className="mt-1 shrink-0 text-xs leading-relaxed text-neutral-500 dark:text-neutral-400">
+            {formatDuration(timing.processingSeconds)} processing
+            <span className="text-neutral-400"> · </span>
+            {formatDuration(timing.wallSeconds)} total
+            {totalCost !== null && (
+              <>
+                <span className="text-neutral-400"> · </span>~{formatCost(totalCost)} OpenAI (est.)
+              </>
+            )}
+          </p>
+          <ol className="mt-3 min-h-0 flex-1 space-y-2 overflow-y-auto">
+            {timing.steps.map((s) => {
+              const done = s.state === "done";
+              const active = s.state === "running";
+              const failed = s.state === "failed";
+              const muted = s.user || s.state === "skipped";
+              const renderPct =
+                active && s.key === "render" && job.render_progress != null
+                  ? Math.min(100, Math.max(0, job.render_progress))
+                  : null;
+
+              return (
+                <li
+                  key={s.key}
+                  className={`min-w-0 rounded-lg border border-neutral-300 px-3 py-3 dark:border-neutral-700 ${
+                    muted ? "opacity-70" : ""
+                  }`}
+                >
+                  <div className="mb-2 flex items-center justify-between gap-2">
+                    <span
+                      className={`min-w-0 truncate text-sm font-medium ${
+                        done
+                          ? "text-emerald-700 dark:text-emerald-300"
+                          : failed
+                            ? "text-red-600"
+                            : active
+                              ? "text-neutral-900 dark:text-neutral-100"
+                              : "text-neutral-400 dark:text-neutral-500"
+                      }`}
+                    >
+                      {s.label}
+                      {s.user && <span className="font-normal text-neutral-500"> (not counted)</span>}
+                      {s.state === "skipped" && <span className="font-normal text-neutral-500"> (pasted text)</span>}
+                    </span>
+                    <span className="flex shrink-0 items-center gap-2">
+                      {s.state !== "skipped" && s.seconds != null && (
+                        <span className={`text-xs tabular-nums ${active ? "font-semibold" : "text-neutral-500"}`}>
+                          {formatDuration(s.seconds)}
+                        </span>
+                      )}
+                      {renderPct != null && (
+                        <span className="text-xs tabular-nums text-neutral-500">{renderPct}%</span>
+                      )}
+                      {done && (
+                        <span className="text-sm font-medium text-emerald-700 dark:text-emerald-300" aria-label="Done">
+                          ✓
+                        </span>
+                      )}
+                    </span>
+                  </div>
+                  <div className="h-2 w-full overflow-hidden rounded-full bg-neutral-200 dark:bg-neutral-800">
+                    {done ? (
+                      <div className="h-full w-full rounded-full bg-emerald-500" />
+                    ) : failed ? (
+                      <div className="h-full w-full rounded-full bg-red-500" />
+                    ) : active && renderPct != null ? (
+                      <div
+                        className="h-full rounded-full bg-brand transition-[width] duration-300 ease-out"
+                        style={{ width: `${renderPct}%` }}
+                      />
+                    ) : active ? (
+                      <div className="h-full w-1/3 animate-pulse rounded-full bg-brand" />
+                    ) : null}
+                  </div>
+                  {(failed || usage[s.key]) && (
+                    <p className="mt-1.5 text-[11px] leading-snug text-neutral-500 dark:text-neutral-400">
+                      {failed && <span className="text-red-600">failed here </span>}
+                      {usage[s.key] && (
+                        <span
+                          className="tabular-nums"
+                          title={
+                            usage[s.key].tokens
+                              ? `${usage[s.key].tokens!.model}; ${usage[s.key].tokens!.reasoning.toLocaleString("en-US")} of the output tokens were reasoning`
+                              : undefined
+                          }
+                        >
+                          {formatUsage(usage[s.key])}
+                          {usage[s.key].cost !== null && ` · ~${formatCost(usage[s.key].cost)}`}
+                        </span>
+                      )}
+                    </p>
+                  )}
+                </li>
+              );
+            })}
+          </ol>
+        </>
+      ) : (
+        <p className="mt-2 shrink-0 text-xs text-neutral-500 dark:text-neutral-400">Waiting for step times…</p>
       )}
-    </div>
+    </aside>
   );
 }
 
-/** Everything about one job: live status, point checklist, progress, voiceover and video. */
+/** Production left column: status and progress without timing, tokens or cost. */
+function ProductionSidebar({ job }: { job: Job }) {
+  const showProgress = job.status !== "failed" || (job.stage_times != null && Object.keys(job.stage_times).length > 0);
+
+  return (
+    <aside className="flex h-full min-h-[28rem] flex-col overflow-hidden rounded-2xl border border-neutral-200 bg-neutral-50/80 p-4 dark:border-neutral-800 dark:bg-neutral-900/50 lg:min-h-[32rem]">
+      <h2 className="shrink-0 text-sm font-semibold tracking-tight">Progress</h2>
+      <p className={`mt-1 shrink-0 text-xs ${job.status === "failed" ? "text-red-600" : "text-neutral-500 dark:text-neutral-400"}`}>
+        {STATUS_LABEL[job.status]}
+      </p>
+      {showProgress && (
+        <div className="mt-2 min-h-0 flex-1 overflow-y-auto">
+          <ProgressSteps
+            status={job.status}
+            renderProgress={job.render_progress}
+            pastedText={job.file_path === ""}
+          />
+        </div>
+      )}
+      {job.status === "rendered" && (
+        <p className="mt-3 shrink-0 text-sm font-medium text-emerald-700 dark:text-emerald-300">Your reel is ready.</p>
+      )}
+    </aside>
+  );
+}
+
+/** Every job column the page uses except the article text, which is large (~130 KB) and only shown on request. */
+const JOB_COLUMNS =
+  "id, status, original_filename, file_path, page_count, word_count, candidate_points, study_setting, audience, " +
+  "selected_point_ids, selected_at, script, segments, total_duration_s, broll, render_progress, video_path, addons, " +
+  "addon_media, stage_times, usage, error, created_at, updated_at";
+
+/**
+ * Read the job row without the article text. Polled every 3 s while a job works, so this is most
+ * of the page's database egress: the full row was ~166 KB, 132 KB of it the text. Falls back to
+ * all columns on a database missing a newer column (before migrations 0006-0008).
+ */
+async function readJobRow(jobId: string): Promise<{ data: Partial<Job> | null; error: { message: string } | null }> {
+  const q = async (columns: string) => {
+    const { data, error } = await supabaseBrowser().from("jobs").select(columns).eq("id", jobId).maybeSingle();
+    return { data: data as Partial<Job> | null, error };
+  };
+  const res = await q(JOB_COLUMNS);
+  return res.error && /column/i.test(res.error.message) ? q("*") : res;
+}
+
+/** Everything about one job: live status, auto-chosen points, progress, voiceover and video. */
 export function JobView({ jobId }: { jobId: string }) {
   const [job, setJob] = useState<Job | null>(null);
   const [notFound, setNotFound] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  // null = the user hasn't changed anything yet, so show the AI's recommended picks.
-  const [userSelection, setUserSelection] = useState<string[] | null>(null);
-  const [saving, setSaving] = useState(false);
-  const [showText, setShowText] = useState(false);
-  const [addons, setAddons] = useState<Addons>({ popups: true }); // pop-up images are on by default
+  const [viewMode, setViewMode] = useState<JobViewMode>("production");
+  // Pop-up images, sound effects and the map intro are on by default.
+  const [addons, setAddonsState] = useState<Addons>(DEFAULT_ADDONS);
+  // Add-ons can be chosen and saved while the article is read; "saved" until changed again.
+  const [addonsSave, setAddonsSave] = useState<"idle" | "saving" | "saved">("idle");
+  const [addonsLoaded, setAddonsLoaded] = useState(false);
+  const autoSelectStarted = useRef(false);
+  function setAddons(a: Addons) {
+    setAddonsState(resolveAddons(a));
+    setAddonsSave("idle");
+  }
+  // Start from choices saved earlier (e.g. after a refresh), once, when the job first loads.
+  if (job && !addonsLoaded) {
+    setAddonsLoaded(true);
+    if (EARLY_STATUSES.includes(job.status)) {
+      setAddonsState(resolveAddons(job.addons));
+      if (job.addons) setAddonsSave("saved");
+    }
+  }
+
+  async function saveAddons() {
+    setAddonsSave("saving");
+    setError(null);
+    try {
+      await readJson(
+        await fetch(`/api/jobs/${jobId}/addons`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ addons }),
+        }),
+      );
+      setAddonsSave("saved");
+    } catch (e) {
+      setAddonsSave("idle");
+      setError(e instanceof Error ? e.message : String(e));
+    }
+  }
 
   const settled = job ? SETTLED_STATUSES.includes(job.status) : false;
   const validId = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(jobId);
 
   // Safety net: Realtime can miss updates (e.g. while it warms up on a fresh project), so
-  // re-read the row every few seconds whenever the job is still working. Restarts after
-  // "Continue", when the job leaves a settled state again.
+  // re-read the row every few seconds whenever the job is still working.
   useEffect(() => {
     if (!validId || settled) return;
     const poll = setInterval(() => {
-      supabaseBrowser()
-        .from("jobs")
-        .select("*")
-        .eq("id", jobId)
-        .single()
-        .then(({ data }) => data && setJob(data as Job));
+      readJobRow(jobId).then(({ data }) => data && setJob((prev) => ({ ...prev, ...data }) as Job));
     }, 3000);
     return () => clearInterval(poll);
   }, [jobId, validId, settled]);
@@ -540,15 +694,10 @@ export function JobView({ jobId }: { jobId: string }) {
     const supabase = supabaseBrowser();
 
     const refresh = () =>
-      supabase
-        .from("jobs")
-        .select("*")
-        .eq("id", jobId)
-        .maybeSingle()
-        .then(({ data, error }) => {
-          if (data) setJob(data as Job);
-          else if (!error) setNotFound(true); // also covers ids that aren't valid UUIDs below
-        });
+      readJobRow(jobId).then(({ data, error }) => {
+        if (data) setJob((prev) => ({ ...prev, ...data }) as Job);
+        else if (!error) setNotFound(true); // also covers ids that aren't valid UUIDs below
+      });
 
     // A malformed id can't match any job; skip the query (Postgres would reject it).
     if (!validId) return;
@@ -572,161 +721,124 @@ export function JobView({ jobId }: { jobId: string }) {
     };
   }, [jobId, validId]);
 
-  function toggle(id: string) {
-    const cur = selected;
-    setUserSelection(
-      cur.includes(id) ? cur.filter((x) => x !== id) : cur.length < MAX_SELECTED_POINTS ? [...cur, id] : cur,
-    );
-  }
-
-  async function saveSelection() {
-    if (!jobId || !selected.length) return;
-    setSaving(true);
-    setError(null);
-    try {
-      const res = await fetch(`/api/jobs/${jobId}/select`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ pointIds: selected, addons }),
-      });
-      const body = (await readJson(res)) as { selected: string[] };
-      // Realtime will deliver the new status too; set it now so the UI doesn't wait.
-      setJob((j) => (j ? { ...j, status: "points_selected", selected_point_ids: body.selected } : j));
-    } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
-    } finally {
-      setSaving(false);
-    }
-  }
+  // Recovery: jobs created before auto-select may still sit on awaiting_selection — continue them.
+  useEffect(() => {
+    if (!job || job.status !== "awaiting_selection" || autoSelectStarted.current) return;
+    const points = job.candidate_points ?? [];
+    const pointIds = points.filter((p) => p.recommended).map((p) => p.id);
+    if (!pointIds.length) return;
+    autoSelectStarted.current = true;
+    void (async () => {
+      try {
+        const res = await fetch(`/api/jobs/${jobId}/select`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ pointIds, addons: resolveAddons(job.addons ?? addons) }),
+        });
+        const body = (await readJson(res)) as { selected: string[] };
+        setJob((j) => (j ? { ...j, status: "points_selected", selected_point_ids: body.selected } : j));
+      } catch (e) {
+        autoSelectStarted.current = false;
+        setError(e instanceof Error ? e.message : String(e));
+      }
+    })();
+  }, [job, jobId, addons]);
 
   const points: CandidatePoint[] = job?.candidate_points ?? [];
-  const recommendedIds = points.filter((p) => p.recommended).map((p) => p.id);
-  const selected = userSelection ?? recommendedIds;
   const chosen = points.filter((p) => job?.selected_point_ids?.includes(p.id));
 
   if (notFound || !validId) return <p className="mt-8 text-sm text-red-600">This job doesn&apos;t exist (or was deleted).</p>;
   if (!job) return <p className="mt-8 text-sm text-neutral-500">Loading…</p>;
 
+  const isTest = viewMode === "test";
+  const reelReady = job.status === "rendered";
+  const addonControls: AddonControls | undefined = EARLY_STATUSES.includes(job.status)
+    ? {
+        value: addons,
+        onChange: setAddons,
+        saveState: addonsSave,
+        onSave: () => void saveAddons(),
+      }
+    : undefined;
+
+  const pointsSection = IN_PRODUCTION.includes(job.status) ? (
+    <div>
+      <h2 className="text-sm font-semibold tracking-tight">{STATUS_LABEL[job.status]}</h2>
+      <p className="mt-3 text-xs text-neutral-600 dark:text-neutral-400">Points for this video:</p>
+      <ol className="mt-1 list-decimal space-y-1 pl-5 text-sm">
+        {chosen.map((p) => (
+          <li key={p.id}>{p.text}</li>
+        ))}
+      </ol>
+    </div>
+  ) : undefined;
+
+  const showControls = !reelReady && Boolean(addonControls || pointsSection);
+
   return (
-    <section className="mt-8">
-      <p className="text-sm">
-        <span className="font-semibold">{job.original_filename}</span> ·{" "}
-        <span className={job.status === "failed" ? "text-red-600" : ""}>{STATUS_LABEL[job.status]}</span>
-        {job.page_count != null && ` · ${job.page_count} ${job.page_count === 1 ? "page" : "pages"}`}
-        {job.word_count != null && ` · ${job.word_count.toLocaleString()} words`}
-      </p>
+    <section>
+      <div className="flex flex-wrap items-center justify-between gap-3">
+        <p className="text-sm text-neutral-600 dark:text-neutral-400">
+          <span className="font-semibold text-neutral-900 dark:text-neutral-100">{job.original_filename}</span>
+          {" · "}
+          {AUDIENCE_LABEL[audienceOf(job)]} video
+          <span className={job.status === "failed" ? " text-red-600" : ""}> · {STATUS_LABEL[job.status]}</span>
+        </p>
+        <div role="tablist" aria-label="View mode" className="inline-flex rounded-lg bg-neutral-100 p-1 text-xs dark:bg-neutral-900">
+          {(
+            [
+              ["production", "Production"],
+              ["test", "Test"],
+            ] as const
+          ).map(([value, label]) => (
+            <button
+              key={value}
+              type="button"
+              role="tab"
+              aria-selected={viewMode === value}
+              onClick={() => setViewMode(value)}
+              className={`rounded-md px-3 py-1.5 font-medium transition ${
+                viewMode === value
+                  ? "bg-white text-neutral-900 shadow-sm dark:bg-neutral-700 dark:text-white"
+                  : "text-neutral-600 dark:text-neutral-400"
+              }`}
+            >
+              {label}
+            </button>
+          ))}
+        </div>
+      </div>
+
       {job.error && <p className="mt-2 text-sm text-red-600">{job.error}</p>}
       {error && <p className="mt-2 text-sm text-red-600">{error}</p>}
-      <TimingPanel job={job} />
 
-      {job.status === "awaiting_selection" && (
-        <div className="mt-6">
-          <div className="flex items-center justify-between">
-            <h2 className="text-lg font-semibold">Which points should the video cover?</h2>
-            <span className="text-sm text-neutral-600 dark:text-neutral-400">
-              {selected.length} / {MAX_SELECTED_POINTS} selected
-            </span>
-          </div>
-          {recommendedIds.length > 0 && (
-            <p className="mt-1 text-sm text-neutral-600 dark:text-neutral-400">
-              {userSelection === null
-                ? "We picked the best points for the video. Adjust them, or just continue."
-                : "Your selection. "}
-              {userSelection !== null && (
-                <button onClick={() => setUserSelection(null)} className="underline underline-offset-2">
-                  Reset to recommended
-                </button>
-              )}
-            </p>
-          )}
-          <ul className="mt-3 space-y-2">
-            {points.map((p) => {
-              const isOn = selected.includes(p.id);
-              const atLimit = !isOn && selected.length >= MAX_SELECTED_POINTS;
-              return (
-                <li key={p.id}>
-                  <label
-                    className={`flex gap-3 rounded-lg border p-3 ${
-                      isOn
-                        ? "border-yellow-400 bg-yellow-50 dark:bg-yellow-400/10"
-                        : "border-neutral-300 dark:border-neutral-700"
-                    } ${atLimit ? "opacity-50" : "cursor-pointer"}`}
-                  >
-                    <input
-                      type="checkbox"
-                      checked={isOn}
-                      disabled={atLimit}
-                      onChange={() => toggle(p.id)}
-                      className="mt-1 h-4 w-4 accent-yellow-500"
-                    />
-                    <span>
-                      <span className="flex items-start gap-2">
-                        <TypeBadge type={p.type} />
-                        {p.recommended && (
-                          <span className="rounded bg-yellow-400 px-1.5 py-0.5 text-xs font-semibold uppercase tracking-wide text-neutral-900">
-                            Recommended
-                          </span>
-                        )}
-                        <span className="text-sm font-medium">{p.text}</span>
-                      </span>
-                      <span className="mt-1 block text-xs text-neutral-500 dark:text-neutral-400">
-                        From the article: “{p.evidence}”
-                      </span>
-                    </span>
-                  </label>
-                </li>
-              );
-            })}
-          </ul>
-          <AddonsPicker value={addons} onChange={setAddons} />
-          <button
-            onClick={saveSelection}
-            disabled={!selected.length || saving}
-            className="mt-4 rounded-md bg-yellow-400 px-5 py-2 font-semibold text-neutral-900 disabled:opacity-40"
-          >
-            {saving ? "Saving…" : "Continue"}
-          </button>
-        </div>
-      )}
+      <div
+        className={`mt-4 grid gap-4 lg:items-stretch lg:gap-6 ${
+          reelReady
+            ? "lg:grid-cols-[17.5rem_minmax(0,1fr)_auto]"
+            : showControls
+              ? "lg:grid-cols-[17.5rem_minmax(18rem,24rem)_minmax(0,1fr)]"
+              : "lg:grid-cols-[17.5rem_minmax(0,1fr)]"
+        }`}
+      >
+        {isTest ? <TimingSidebar job={job} /> : <ProductionSidebar job={job} />}
 
-      {IN_PRODUCTION.includes(job.status) && (
-        <div className="mt-6 rounded-lg border border-neutral-300 p-4 dark:border-neutral-700">
-          <h2 className="font-semibold">{STATUS_LABEL[job.status]}</h2>
-          <ProgressSteps status={job.status} renderProgress={job.render_progress} />
-          <p className="mt-3 text-sm text-neutral-600 dark:text-neutral-400">Your points:</p>
-          <ol className="mt-1 list-decimal space-y-1 pl-5 text-sm">
-            {chosen.map((p) => (
-              <li key={p.id}>{p.text}</li>
-            ))}
-          </ol>
-        </div>
-      )}
+        {showControls && <JobControlsColumn addons={addonControls} pointsSection={pointsSection} />}
 
-      {job.status === "rendered" && (
-        <VideoPanel
+        <JobMediaPanel
           jobId={job.id}
-          broll={job.broll}
-          postCaption={job.script?.postCaption}
-          addonMedia={job.addon_media}
+          filename={job.original_filename}
+          status={job.status}
+          filePath={job.file_path}
+          wordCount={job.word_count}
         />
-      )}
 
-      {/* The script and voiceover can be played while the video renders, and stay below it after. */}
-      {job.segments && ["voiced", "fetching_broll", "rendering", "rendered"].includes(job.status) && (
+        {reelReady && <ReelPanel jobId={job.id} />}
+      </div>
+
+      {/* Script/voiceover details stay in Test view; Production focuses on article + reel. */}
+      {isTest && job.segments && ["voiced", "fetching_broll", "rendering", "rendered"].includes(job.status) && (
         <VoiceoverPanel jobId={job.id} segments={job.segments} total={job.total_duration_s} script={job.script} />
-      )}
-
-      {job.extracted_text && (
-        <div className="mt-6">
-          <button onClick={() => setShowText((s) => !s)} className="text-sm underline underline-offset-2">
-            {showText ? "Hide extracted text" : "Show extracted text"}
-          </button>
-          {showText && (
-            <pre className="mt-3 max-h-[60vh] overflow-auto whitespace-pre-wrap rounded-lg bg-neutral-100 p-4 text-sm leading-relaxed dark:bg-neutral-900">
-              {job.extracted_text}
-            </pre>
-          )}
-        </div>
       )}
     </section>
   );

@@ -28,11 +28,11 @@ type StepDef = { key: string; label: string; from: JobStatus | "created"; to: Jo
 export const STEP_DEFS: StepDef[] = [
   { key: "upload", label: "Upload", from: "created", to: "uploaded" },
   { key: "read", label: "Read the PDF", from: "uploaded", to: "proposing" },
-  { key: "points", label: "Find points", from: "proposing", to: "awaiting_selection" },
-  { key: "choice", label: "Your choice", from: "awaiting_selection", to: "points_selected", user: true },
+  // Points are auto-chosen; there is no user "Pick points" pause for now.
+  { key: "points", label: "Find points", from: "proposing", to: "points_selected" },
   { key: "script", label: "Write script", from: "points_selected", to: "voicing" },
   { key: "voice", label: "Record voice", from: "voicing", to: "fetching_broll" },
-  { key: "footage", label: "Find footage", from: "fetching_broll", to: "rendering" },
+  { key: "footage", label: "Find visual materials", from: "fetching_broll", to: "rendering" },
   { key: "render", label: "Render + save", from: "rendering", to: "rendered" },
 ];
 
@@ -48,9 +48,9 @@ export type StepTiming = {
 
 export type JobTiming = {
   steps: StepTiming[];
-  /** Machine time: all steps except the user's choice. */
+  /** Machine time: all non-user steps. */
   processingSeconds: number;
-  /** Created to finished (or to now, if still going), including the user's choice. */
+  /** Created to finished (or to now, if still going). */
   wallSeconds: number;
   running: boolean;
 };
@@ -103,7 +103,6 @@ export function jobTiming(
     steps,
     processingSeconds,
     wallSeconds: Math.max(0, ((Number.isFinite(endAt) ? endAt : now) - t(times.created)) / 1000),
-    // Includes waiting for the user's choice, so that step's clock ticks too.
     running: !settled,
   };
 }

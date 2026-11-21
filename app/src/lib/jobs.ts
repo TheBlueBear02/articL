@@ -15,7 +15,26 @@ export type JobStatus =
   | "failed";
 
 // Statuses after which the job won't change again without user action.
-export const SETTLED_STATUSES: JobStatus[] = ["awaiting_selection", "rendered", "failed"];
+// (awaiting_selection is no longer a pause — points are auto-chosen — but old rows may still have it.)
+export const SETTLED_STATUSES: JobStatus[] = ["rendered", "failed"];
+
+/** Short labels for the job page and My videos list. */
+export const STATUS_LABEL: Record<JobStatus, string> = {
+  awaiting_upload: "Uploading…",
+  uploaded: "Uploaded, waiting to start…",
+  extracting: "Extracting text…",
+  extracted: "Text extracted",
+  proposing: "Finding key points…",
+  awaiting_selection: "Choosing points…",
+  points_selected: "Points saved",
+  scripting: "Writing the script…",
+  voicing: "Recording the voiceover…",
+  voiced: "Voiceover ready",
+  fetching_broll: "Finding visual materials…",
+  rendering: "Rendering the video…",
+  rendered: "Video ready",
+  failed: "Failed",
+};
 
 /** The media picked for one shot (older jobs: one photo per segment, without kind/shot). */
 export type BrollImage = {
@@ -35,7 +54,30 @@ export type BrollImage = {
   pageURL: string;
 };
 
-export type PointType = "stat" | "quote" | "claim";
+/** stat / quote / claim are findings; question and method (Student videos) are the research
+ *  question and how it was tested. */
+export type PointType = "stat" | "quote" | "claim" | "question" | "method";
+
+// ---- Who the video is for (migration 0008) ----
+export const AUDIENCES = ["social", "student", "academic", "kids"] as const;
+export type Audience = (typeof AUDIENCES)[number];
+/** Audiences that can be chosen today; the others show as "coming soon". */
+export const READY_AUDIENCES: Audience[] = ["social", "student"];
+export const AUDIENCE_LABEL: Record<Audience, string> = {
+  social: "Social",
+  student: "Student",
+  academic: "Academic",
+  kids: "Kids",
+};
+export const AUDIENCE_HINT: Record<Audience, string> = {
+  social: "Hooky, fast reel of the main findings (up to 60 s)",
+  student: "The question, how it was tested and what was found (60-90 s)",
+  academic: "Design, methods and results in depth (coming soon)",
+  kids: "One big idea, cartoon style (coming soon)",
+};
+/** Older jobs and databases before migration 0008 are Social. */
+export const audienceOf = (job: { audience?: string | null }): Audience =>
+  (AUDIENCES as readonly string[]).includes(job.audience ?? "") ? (job.audience as Audience) : "social";
 
 export type CandidatePoint = {
   id: string;
@@ -46,6 +88,8 @@ export type CandidatePoint = {
   evidence: string;
   /** One of the (up to) 5 points pre-selected for the video. */
   recommended?: boolean;
+  /** Student videos: the study's main result (the answer to its question). */
+  main?: boolean;
 };
 
 /** One fact about where/when/who the study was, with the article sentence that states it. */
@@ -94,6 +138,8 @@ export type Segment = {
   shots?: string[];
   /** Beats only: the word to show a pop-up photo for (older jobs don't have it). */
   popup?: Popup;
+  /** Student videos: the on-screen section label ("THE QUESTION"). */
+  section?: string;
   /** Path inside the private "media" bucket. */
   audioPath: string;
   duration: number;
@@ -110,8 +156,32 @@ export type Addons = {
   split?: SplitStyle;
   /** With split "gameplay": the library clip to use (path in the "library" bucket); omitted = pick one. */
   gameplayClip?: string;
-  /** Small photos that pop up when a picturable word is spoken (on by default in the picker). */
+  /** Small photos that pop up when a picturable word is spoken (on by default). */
   popups?: boolean;
+  /** Pop / ding / whoosh sounds on pop-ups, number callouts and new beats (on by default). */
+  sfx?: boolean;
+  /** A map zooming into the study's country in the first beat (on by default; needs a known country). */
+  map?: boolean;
+};
+
+/** Pop-ups, sound effects and map start on; music and split stay off until chosen. */
+export const DEFAULT_ADDONS: Addons = { popups: true, sfx: true, map: true };
+
+/** Fill in default on/off flags when a job has no saved add-ons (or only music/split). */
+export function resolveAddons(raw?: Addons | null): Addons {
+  return { ...DEFAULT_ADDONS, ...(raw ?? {}) };
+}
+
+/** The map intro picked for a job: the country and when it shows. */
+export type MapMedia = {
+  /** Natural Earth country name (finds the shape). */
+  country: string;
+  /** As the article writes it ("England"), shown on the map. */
+  label: string;
+  /** "2007–2011", or "" when the period is unknown. */
+  period: string;
+  start: number;
+  end: number;
 };
 
 /** A pop-up photo picked for a beat, with its time on the film and its Pixabay credit. */
@@ -153,9 +223,20 @@ export type AddonMedia = {
   music?: { path: string; title: string; artist?: string };
   bottom?: BottomClip[];
   popups?: PopupMedia[];
+  map?: MapMedia;
+  /** Pop-up photos chosen while the voice was recorded; the footage step times and uses them. */
+  preparedPopups?: PreparedPopup[];
 };
 
-/** What the library has, for the add-on choices on the points screen. */
+/** A beat's pop-up photo, picked before the recording's timing is known. */
+export type PreparedPopup = {
+  segment: number;
+  word: string;
+  query: string;
+  photo: { id: number; largeImageURL: string; user: string; pageURL: string; webformatURL?: string };
+};
+
+/** What the library has, for the add-on choices while the article is prepared. */
 export type GameplayClip = {
   path: string;
   /** Readable name from the file name ("minecraft-parkour-1min.mp4" -> "minecraft parkour 1min"). */
@@ -175,6 +256,10 @@ export type Job = {
   extracted_text: string | null;
   candidate_points: CandidatePoint[] | null;
   study_setting?: StudySetting | null;
+  /** OpenAI usage per step (migration 0009): see lib/pricing.ts. */
+  usage?: import("./pricing").JobUsage | null;
+  /** Who the video is for (migration 0008); missing means "social". */
+  audience?: Audience | null;
   selected_point_ids: string[] | null;
   selected_at: string | null;
   script: Script | null;

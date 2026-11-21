@@ -1,12 +1,14 @@
 // Phase 3: turn the selected points into a spoken script, and check it before recording.
 import { chatJson, type Usage } from "./openai";
-import type { CandidatePoint, Script, StudySetting } from "./jobs";
+import type { Audience, CandidatePoint, Script, StudySetting } from "./jobs";
 import { settingBlock, targetMinWords } from "./script-checks";
 export {
   autoFixScript,
   checkScript,
   DEFAULT_MAX_WORDS,
+  lengthFor,
   OPTIONAL_FIELD_PROBLEM,
+  sectionFor,
   SOFT_PROBLEM,
   scriptSegments,
   scriptWordCount,
@@ -54,7 +56,8 @@ Write these fields:
 
 Rules (checked automatically):
 - Plain spoken English for a text-to-speech voice: short sentences, no symbols, abbreviations or
-  parentheses. Write "percent", ranges as "9 to 12", and every number as digits ("6 weeks").
+  parentheses. Write "percent", ranges as "9 to 12", and every number as digits ("6 weeks"); money as digits plus the
+  currency word ("50 pounds", not "£50" or "fifty pounds").
   Apostrophes are fine and needed: "headmen's houses", "don't".
 - If a 12-year-old wouldn't know a word (e.g. "randomized", "referenda", "socioeconomic",
   "market exposure"), say it in everyday words instead.
@@ -62,6 +65,57 @@ Rules (checked automatically):
   convert a number ("1 in 8" stays "1 in 8", not "12.5 percent"); "percentage points" are not "percent".
 - Never mention the video itself ("in this video", "at the end", "payoff", "loop", field names).
 - Use {MIN_WORDS} to {MAX_WORDS} words across hook, beats and closing.`;
+
+/** Replace one exact part of the Social prompt; fails loudly if the Social prompt changed under it. */
+function swap(prompt: string, from: string, to: string): string {
+  if (!prompt.includes(from)) throw new Error(`Student prompt: part not found in the Social prompt: ${from.slice(0, 40)}`);
+  return prompt.replace(from, to);
+}
+
+// Student videos: the same fields, checks and loop, told as question -> how it was tested -> what
+// was found -> why it matters. Only the intro, the beat order and the jargon rule differ.
+const STUDENT_PROMPT = [
+  [
+    SYSTEM_PROMPT.slice(0, SYSTEM_PROMPT.indexOf("You get the article's title")),
+    `You write the script for a 60 to 90 second vertical video that explains a research study to
+students who want to understand what it asked, how it was tested and what it found.
+
+After watching, the student should know:
+- the research question,
+- how the study was done: where, when and with whom (from STUDY SETTING) and the method (from the
+  "question" and "method" points),
+- the main findings, and why they matter.
+
+`,
+  ],
+  [
+    `- payoffPointId: the most surprising chosen point.`,
+    `- payoffPointId: the point marked "the main result" if there is one, otherwise the most important finding (not a question or method point).`,
+  ],
+  [
+    `- beats: exactly one per chosen point (pointId is that point's id; no extra beats), 1-3 sentences each, ordered as a story with the payoff point last.
+  The first beat opens with where, when and with whom the study was done (only what STUDY SETTING
+  gives), then its point; there is no separate setting beat. Start one middle beat with a short
+  re-hook such as "But here's the strange part".
+  The payoff beat states its key number.`,
+    `- beats: exactly one per chosen point (pointId is that point's id; no extra beats), 1-3 sentences each, in this order:
+  the "question" point(s) first, then the "method" points, then the findings, with the payoff point last.
+  The first beat states the research question and where, when and with whom the study was done (only
+  what STUDY SETTING gives); there is no separate setting beat. Method beats say plainly what the
+  researchers did, step by step ("First...", "Then..."). Findings beats state their numbers.`,
+  ],
+  [
+    `- closing: the takeaway in one sentence,`,
+    `- closing: why the findings matter, in one sentence,`,
+  ],
+  [
+    `- If a 12-year-old wouldn't know a word (e.g. "randomized", "referenda", "socioeconomic",
+  "market exposure"), say it in everyday words instead.`,
+    `- Key research terms are welcome when the same sentence explains them ("randomly assigned, like a
+  coin flip", "a control group that got nothing"). Any other term a first-year student wouldn't know
+  (e.g. "coefficients", "heterogeneity", "endline") must be said in everyday words.`,
+  ],
+].reduce((p, [from, to]) => swap(p, from, to), SYSTEM_PROMPT);
 
 const SHOTS = { type: "array", items: { type: "string" } };
 
@@ -138,24 +192,33 @@ export type DraftInput = {
   maxWords: number;
   /** Problems with the previous attempt, so the model can fix them. */
   feedback?: string[];
+  /** Who the video is for; "student" tells it as question -> method -> findings. */
+  audience?: Audience;
 };
 
 export async function draftScript(input: DraftInput): Promise<{ script: Script; usage: Usage; model: string }> {
   const pointsBlock = input.points
-    .map((p) => `- id ${p.id} (${p.type}): ${p.text}\n  Source sentence: "${p.evidence}"`)
+    .map((p) => `- id ${p.id} (${p.type}${p.main ? ", the main result" : ""}): ${p.text}\n  Source sentence: "${p.evidence}"`)
     .join("\n");
+  // Testing (Bertrand, 5 points): the model left a point out in 2 of 3 drafts and wrote 200 words for a
+  // 150-word limit. Naming every beat and giving each part a word budget keeps both in check.
+  const ids = input.points.map((p) => p.id);
+  const perBeat = Math.max(12, Math.floor((input.maxWords - 30) / Math.max(1, ids.length)));
+  const plan =
+    `\n\nBEATS NEEDED: exactly ${ids.length}, one for each of ${ids.join(", ")}; leave none out.` +
+    `\nWORD BUDGET: hook about 15 words, each beat about ${perBeat} words, closing about 15 words.`;
   const feedback = input.feedback?.length
     ? `\n\nYour previous draft was rejected. Fix these problems:\n- ${input.feedback.join("\n- ")}`
     : "";
 
   const { data: raw, usage, model } = await chatJson<Script>({
-    system: SYSTEM_PROMPT.replace("{MAX_WORDS}", String(input.maxWords)).replace(
+    system: (input.audience === "student" ? STUDENT_PROMPT : SYSTEM_PROMPT).replace("{MAX_WORDS}", String(input.maxWords)).replace(
       "{MIN_WORDS}",
       String(targetMinWords(input.maxWords)),
     ),
     user:
       `TITLE: ${input.title}\n\nOPENING OF THE ARTICLE:\n${input.opening}\n\n` +
-      `STUDY SETTING:\n${settingBlock(input.setting)}\n\nCHOSEN POINTS:\n${pointsBlock}${feedback}`,
+      `STUDY SETTING:\n${settingBlock(input.setting)}\n\nCHOSEN POINTS:\n${pointsBlock}${plan}${feedback}`,
     schemaName: "reel_script",
     schema: SCHEMA,
   });

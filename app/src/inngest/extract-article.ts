@@ -1,11 +1,13 @@
 import { extractText, getDocumentProxy } from "unpdf";
-import { inngest, ARTICLE_UPLOADED, type ArticleUploadedData } from "./client";
+import { inngest, ARTICLE_UPLOADED, POINTS_SELECTED, type ArticleUploadedData } from "./client";
 import { supabaseAdmin, ARTICLES_BUCKET } from "@/lib/supabase/server";
 import { setJob } from "@/lib/supabase/jobs-db";
 import { proposePoints } from "@/lib/openai";
 import { applyRecommendations, trimBackMatter, verifyPoints, verifySetting } from "@/lib/points";
-import { MAX_SELECTED_POINTS, type CandidatePoint, type StudySetting } from "@/lib/jobs";
+import { audienceOf, MAX_SELECTED_POINTS, type CandidatePoint, type StudySetting } from "@/lib/jobs";
 import { cleanText, MIN_TEXT_CHARS } from "@/lib/text";
+import { saveTokens, tokensOf } from "@/lib/usage-db";
+import type { TokenUsage } from "@/lib/pricing";
 
 // Below this many verified points the checklist isn't useful; ask the model once more.
 const MIN_VERIFIED_POINTS = 3;
@@ -82,20 +84,34 @@ export const extractArticle = inngest.createFunction(
       if (error || !data?.extracted_text) throw new Error(`Reading text for job ${jobId} failed: ${error?.message}`);
       const fullText: string = data.extracted_text;
       const articleText = trimBackMatter(fullText);
+      // Separate query so jobs keep working before migration 0008 adds the column.
+      const { data: who } = await supabaseAdmin().from("jobs").select("audience").eq("id", jobId).single();
+      const audience = audienceOf(who ?? {});
 
       const usage = [];
+      const calls: TokenUsage[] = []; // both attempts are billed, even when the first is kept
       let kept: CandidatePoint[] = [];
       let dropped: { reason: string; text: string }[] = [];
       let setting: StudySetting = {};
-      for (let attempt = 1; attempt <= 2 && kept.length < MIN_VERIFIED_POINTS; attempt++) {
-        const result = await proposePoints(articleText);
+      // Student videos also need their main result and research question to pass the checks: if
+      // either was dropped, ask once more and keep the better attempt. Testing (Olken): the main
+      // audit result failed the number check in 3 runs out of 3, so the videos missed it.
+      const complete = (k: CandidatePoint[]) =>
+        audience !== "student" || (k.some((p) => p.main) && k.some((p) => p.type === "question"));
+      const score = (k: CandidatePoint[]) => (k.length >= MIN_VERIFIED_POINTS ? 2 : 0) + (complete(k) ? 1 : 0);
+      for (let attempt = 1; attempt <= 2 && !(kept.length >= MIN_VERIFIED_POINTS && complete(kept)); attempt++) {
+        const result = await proposePoints(articleText, audience);
         usage.push({ model: result.model, ...result.usage });
+        calls.push(tokensOf(result.model, result.usage));
         const withIds = result.points.map((p, i) => ({ id: `p${i + 1}`, ...p }));
         const verified = verifyPoints(withIds, fullText);
+        if (attempt > 1 && score(verified.kept) < score(kept)) continue; // the first attempt was better
         kept = verified.kept;
         dropped = verified.dropped.map((d) => ({ reason: d.reason, text: d.point.text }));
         setting = verifySetting(result.setting, fullText);
       }
+
+      await saveTokens(jobId, "points:1", calls);
 
       if (kept.length < MIN_VERIFIED_POINTS) {
         await setJob(jobId, {
@@ -105,18 +121,37 @@ export const extractArticle = inngest.createFunction(
         return { ok: false, kept: kept.length, dropped, usage };
       }
 
-      // Pre-select the best 5 (recommended first), then renumber so ids are tidy.
-      const points = applyRecommendations(kept, MAX_SELECTED_POINTS).map((p, i) => ({ ...p, id: `p${i + 1}` }));
+      // Auto-pick the best points (recommended first), then renumber so ids are tidy.
+      // Manual selection is skipped for now; the select API remains as a recovery path.
+      const points = applyRecommendations(kept, MAX_SELECTED_POINTS, audience).map((p, i) => ({ ...p, id: `p${i + 1}` }));
+      const selectedIds = points.filter((p) => p.recommended).map((p) => p.id);
+      const selected_at = new Date().toISOString();
       try {
-        await setJob(jobId, { status: "awaiting_selection", candidate_points: points, study_setting: setting });
+        await setJob(jobId, {
+          status: "points_selected",
+          candidate_points: points,
+          study_setting: setting,
+          selected_point_ids: selectedIds,
+          selected_at,
+        });
       } catch (e) {
         // Before migration 0007 there is no study_setting column: save the points without it.
         if (!/study_setting/.test(String(e))) throw e;
-        await setJob(jobId, { status: "awaiting_selection", candidate_points: points });
+        await setJob(jobId, {
+          status: "points_selected",
+          candidate_points: points,
+          selected_point_ids: selectedIds,
+          selected_at,
+        });
       }
       const modelRecommended = kept.filter((p) => p.recommended).length;
-      return { ok: true, kept: points.length, modelRecommended, dropped, setting, usage };
+      return { ok: true, kept: points.length, modelRecommended, selected: selectedIds.length, dropped, setting, usage };
     });
+
+    // Kick off script + voice once points are auto-chosen (same event as the old Continue button).
+    if (proposal.ok) {
+      await step.sendEvent("start-script", { name: POINTS_SELECTED, data: { jobId } });
+    }
 
     return { jobId, ...summary, proposal };
   },

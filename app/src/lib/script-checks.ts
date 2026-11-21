@@ -1,5 +1,5 @@
 // Phase 3 script checks. Pure (type-only imports), so they can be tested with plain node.
-import type { CandidatePoint, Popup, Script, StudySetting } from "./jobs";
+import type { Audience, CandidatePoint, PointType, Popup, Script, StudySetting } from "./jobs";
 
 /** ~150 words is ~55 s at TTS speed 1.1 (measured: the spike's 20 words took 5.97 s). */
 export const DEFAULT_MAX_WORDS = 150;
@@ -10,14 +10,42 @@ const MAX_TITLE_WORDS = 7;
 export const targetMinWords = (maxWords: number) => Math.round(maxWords * 0.8);
 
 /** Problems worth one rewrite but not a failed run: on the last attempt the script is used anyway. */
-export const SOFT_PROBLEM = /^(Too short|Too long|Jargon|Spoiler)\b/;
-/** Up to 15% over the word limit only costs a rewrite, not the run. */
-const SOFT_OVER = 1.15;
+export const SOFT_PROBLEM = /^(Too short|Too long|Jargon|Spoiler|Order)\b/;
+// Up to 30% over is accepted on the last attempt: the recorded length is the real gate (one shorter
+// rewrite over 60 s, never over 75 s). Testing: Bertrand failed outright at 200 words for 150.
+const SOFT_OVER = 1.3;
 
 // Research words the general public won't know. Testing: the "12-year-old" prompt rule alone still
 // let "randomized", "referenda", "socioeconomic" and "0.095 standard units" through.
 const JARGON =
   /\b(randomi[sz]ed|randomi[sz]ation|referenda|statistically significant|standard (?:deviations?|units?)|treatment group|control group|socioeconomic|coefficients?|heterogene\w+|regressions?|endline|baseline survey|ITT)\b/gi;
+
+// Student videos teach the key method terms (the prompt asks to explain them in the same sentence),
+// so only terms a first-year student can't be expected to know count as jargon.
+const STUDENT_JARGON =
+  /\b(standard (?:deviations?|units?)|coefficients?|heterogene\w+|regressions?|endline|ITT|referenda|principal components?(?: analysis)?)\b/gi;
+
+/**
+ * Length per audience. Social: ~150 words is ~55 s at TTS speed 1.1. Student: slower and calmer
+ * (speed 1.0, ~2.5 words a second), so ~210 words is ~85 s.
+ */
+export function lengthFor(audience: Audience = "social") {
+  return audience === "student"
+    ? { maxWords: 210, targetS: 90, hardMaxS: 100, ttsSpeed: 1.0 }
+    : { maxWords: DEFAULT_MAX_WORDS, targetS: 60, hardMaxS: 75, ttsSpeed: 1.1 };
+}
+
+/**
+ * Student videos: the on-screen label for a part, from its point's type. The hook has none.
+ * Other audiences: no labels.
+ */
+export function sectionFor(kind: "hook" | "beat" | "closing", pointType: PointType | undefined, audience: Audience = "social") {
+  if (audience !== "student" || kind === "hook") return undefined;
+  if (kind === "closing") return "WHY IT MATTERS";
+  if (pointType === "question") return "THE QUESTION";
+  if (pointType === "method") return "HOW THEY TESTED IT";
+  return "WHAT THEY FOUND";
+}
 
 /** The STUDY SETTING block the script model sees (and the checks allow numbers from). */
 export function settingBlock(setting: StudySetting | null | undefined): string {
@@ -105,14 +133,50 @@ function numbersIn(s: string): string[] {
 
 // Spelled-out quantities could slip a figure past the digit check, so flag them.
 // Testing: "After six weeks" slipped through when only "six percent" was flagged.
+// A scale word after digits ("1.2 million") is fine.
 const SPELLED_NUMBER =
-  /\b(eleven|twelve|thirteen|fourteen|fifteen|sixteen|seventeen|eighteen|nineteen|twenty|thirty|forty|fifty|sixty|seventy|eighty|ninety|hundred|thousand|million|billion)\b|\b(?:one|two|three|four|five|six|seven|eight|nine|ten)\s+(?:percent|percentage|points?|weeks?|months?|years?|days?|hours?|times)\b/i;
+  /\b(eleven|twelve|thirteen|fourteen|fifteen|sixteen|seventeen|eighteen|nineteen|twenty|thirty|forty|fifty|sixty|seventy|eighty|ninety)\b|(?<!\d\s?)\b(hundred|thousand|million|billion)\b|\b(?:one|two|three|four|five|six|seven|eight|nine|ten)(?:\s+|-)(?:percent|percentage|points?|weeks?|months?|years?|days?|hours?|times)\b/i;
 
 const SMALL_NUMBERS = ["one", "two", "three", "four", "five", "six", "seven", "eight", "nine", "ten"];
 const SMALL_SPELLED = new RegExp(
-  `\\b(${SMALL_NUMBERS.join("|")})\\s+(percent|percentage|points?|weeks?|months?|years?|days?|hours?|times)\\b`,
+  // Also hyphenated: "six-week" -> "6-week". Testing: a Student hook said "A six-week stock experiment".
+  `\\b(${SMALL_NUMBERS.join("|")})(\\s+|-)(percent|percentage|points?|weeks?|months?|years?|days?|hours?|times)\\b`,
   "gi",
 );
+
+const UNITS: Record<string, number> = {
+  one: 1, two: 2, three: 3, four: 4, five: 5, six: 6, seven: 7, eight: 8, nine: 9, ten: 10,
+  eleven: 11, twelve: 12, thirteen: 13, fourteen: 14, fifteen: 15, sixteen: 16, seventeen: 17,
+  eighteen: 18, nineteen: 19, twenty: 20, thirty: 30, forty: 40, fifty: 50, sixty: 60,
+  seventy: 70, eighty: 80, ninety: 90,
+};
+const SCALES: Record<string, number> = { hundred: 100, thousand: 1000, million: 1e6, billion: 1e9 };
+const NUM_WORD = `(?:${[...Object.keys(UNITS), ...Object.keys(SCALES)].join("|")})`;
+/** A run of number words: "fifty", "twenty-five", "one thousand five hundred and sixty". */
+// Not after digits ("1.2 million" is already right); "a hundred" is taken whole.
+const SPELLED_RUN = new RegExp(
+  `(?<!\\d\\s?)\\b(?:an?\\s+(?=hundred|thousand|million|billion))?${NUM_WORD}(?:(?:[\\s-]+|\\s+and\\s+)${NUM_WORD})*\\b`,
+  "gi",
+);
+const BIG_WORD = /\b(?:eleven|twelve|\w+teen|twenty|thirty|forty|fifty|sixty|seventy|eighty|ninety|hundred|thousand|million|billion)\b/i;
+
+/** "one thousand five hundred and sixty" -> 1560; null if the words don't form a number. */
+function spelledValue(run: string): number | null {
+  let total = 0;
+  let current = 0;
+  for (const w of run.toLowerCase().split(/[\s-]+/).filter((x) => !["and", "a", "an"].includes(x))) {
+    if (w in UNITS) current += UNITS[w];
+    else if (w === "hundred") current = (current || 1) * 100;
+    else if (w in SCALES) {
+      total += (current || 1) * SCALES[w];
+      current = 0;
+    } else return null;
+  }
+  return total + current;
+}
+
+/** "And the payoff:", "Here's the payoff —" at a sentence start (only with a colon or dash after it). */
+const PAYOFF_LABEL = /(?<=^|[.!?]\s+)(?:and\s+)?(?:here(?:'s|’s|\s+is)\s+)?the\s+pay-?off\s*[:—–-]\s*/gi;
 
 // Testing: "Would a small stock test nudge people...? The answer might surprise you."
 const HOOK_FILLER = /\b(?:the answer (?:might|may|will) surprise you|you won'?t believe|guess what)\b/i;
@@ -121,7 +185,11 @@ const HOOK_FILLER = /\b(?:the answer (?:might|may|will) surprise you|you won'?t 
 const STRUCTURE_TALK =
   /\b(payoff|pay-off|pointid|hooktitle|payoffpointid|in this video|this video|(?:stay|wait|watch) (?:to|till|until) the end|comes at the end|at the end of (?:this|the) video|loop)\b/i;
 
-const SYMBOLS =/[%()[\]{}<>#@*_~|\\/^=+]|\b(?:e\.g|i\.e|etc)\b/i;
+const SYMBOLS = /[%()[\]{}<>#@*_~|\\/^=+$£€₹]|\b(?:e\.g|i\.e|etc|Rs|USD|INR)\b/i;
+
+/** "Rs 1,120", "$50", "£50", "USD 3 million" -> amount + currency word (autoFixScript). */
+const CURRENCY_WORD: Record<string, string> = { rs: "rupees", inr: "rupees", "₹": "rupees", $: "dollars", usd: "dollars", "£": "pounds", "€": "euros" };
+const CURRENCY = /(\bRs\.?|\bINR|\bUSD|₹|\$|£|€)\s?(\d(?:[\d,]*\d)?(?:\.\d+)?)(\s(?:thousand|million|billion))?/gi;
 
 export function countWords(s: string): number {
   return s.trim() ? s.trim().split(/\s+/).length : 0;
@@ -156,7 +224,11 @@ export function percentagePointNumbers(points: CandidatePoint[]): Set<string> {
  * Only "percent" -> "percentage points" for numbers the article gives only in percentage points.
  * Returns the fixed script and what was changed.
  */
-export function autoFixScript(script: Script, points: CandidatePoint[]): { script: Script; fixes: string[] } {
+export function autoFixScript(
+  script: Script,
+  points: CandidatePoint[],
+  audience: Audience = "social",
+): { script: Script; fixes: string[] } {
   const fixes: string[] = [];
   const nums = percentagePointNumbers(points);
   const fix = (label: string, text: string, short = false): string => {
@@ -166,10 +238,37 @@ export function autoFixScript(script: Script, points: CandidatePoint[]): { scrip
       return `${w}'s`;
     });
     // Small spelled numbers before a unit have one right answer: "six weeks" -> "6 weeks".
-    out = out.replace(SMALL_SPELLED, (m, word: string, unit: string) => {
-      const digits = `${SMALL_NUMBERS.indexOf(word.toLowerCase()) + 1} ${unit}`;
+    out = out.replace(SMALL_SPELLED, (m, word: string, gap: string, unit: string) => {
+      const digits = `${SMALL_NUMBERS.indexOf(word.toLowerCase()) + 1}${gap === "-" ? "-" : " "}${unit}`;
       fixes.push(`${label}: "${m}" -> "${digits}"`);
       return digits;
+    });
+    // Larger spelled numbers have one right answer too: "fifty pounds" -> "50 pounds". The digit
+    // check then still makes sure the number is in the point. Testing: the point said "£50", the
+    // prompt says no symbols, and the model wrote "fifty pounds" in all 3 attempts.
+    // Small ones without a unit ("one in eight") are left alone.
+    out = out.replace(SPELLED_RUN, (m) => {
+      const value = BIG_WORD.test(m) ? spelledValue(m) : null;
+      if (value == null) return m;
+      const digits =
+        value >= 1e6 && value % 1e6 === 0 ? `${value / 1e6} million` : value.toLocaleString("en-US");
+      fixes.push(`${label}: "${m}" -> "${digits}"`);
+      return digits;
+    });
+    // A label for the last beat has one right fix: drop it. Testing: "And the payoff: 62 percent of..."
+    const unlabelled = out.replace(PAYOFF_LABEL, (m) => {
+      fixes.push(`${label}: dropped "${m.trim()}"`);
+      return "";
+    });
+    if (unlabelled !== out) {
+      // Capitalize what now starts a sentence: "62 percent" stays, "of those" -> "Of those".
+      out = unlabelled.replace(/(^|[.!?]\s+)([a-z])/g, (_m, pre: string, c: string) => pre + c.toUpperCase());
+    }
+    // Currency signs and codes read badly aloud. Testing: "Rs 1,120" (rupees) reached the voice.
+    out = out.replace(CURRENCY, (m, sign: string, amount: string, scale = "") => {
+      const spoken = `${amount}${scale} ${CURRENCY_WORD[sign.toLowerCase().replace(".", "")]}`;
+      fixes.push(`${label}: "${m}" -> "${spoken}"`);
+      return spoken;
     });
     // The everyday plural; the points often copy the article's "referenda".
     out = out.replace(/\breferenda\b/gi, (m) => {
@@ -205,15 +304,41 @@ export function autoFixScript(script: Script, points: CandidatePoint[]): { scrip
     const merged = { ...target, text, popup: target.popup?.word ? target.popup : stray.popup };
     beats = beats.flatMap((b, k) => (k === i ? [] : k === j ? [merged] : [b]));
   }
+  let payoffPointId = script.payoffPointId;
+  // Student videos tell the study in order (question, method, findings) and end on a finding; both
+  // have one right answer. Testing (Olken): the soft order check let finding -> method -> finding ->
+  // finding -> method through on the last attempt, with a method point as the payoff.
+  if (audience === "student") {
+    const rank = (id: string) => {
+      const t = points.find((p) => p.id === id)?.type;
+      return t === "question" ? 0 : t === "method" ? 1 : 2;
+    };
+    const findings = beats.filter((b) => rank(b.pointId) === 2);
+    // The study's main result is the payoff: the video ends on the answer to its question.
+    const main = points.find((p) => p.main && beats.some((b) => b.pointId === p.id) && rank(p.id) === 2);
+    if (main && payoffPointId !== main.id) {
+      fixes.push(`Payoff set to the main result ${main.id}`);
+      payoffPointId = main.id;
+    } else if (payoffPointId && rank(payoffPointId) !== 2 && findings.length) {
+      fixes.push(`Payoff ${payoffPointId} is not a finding; used ${findings[findings.length - 1].pointId}`);
+      payoffPointId = findings[findings.length - 1].pointId;
+    }
+    const sorted = beats.map((b, i) => ({ b, i })).sort((x, y) => rank(x.b.pointId) - rank(y.b.pointId) || x.i - y.i).map(({ b }) => b);
+    if (sorted.some((b, i) => b !== beats[i])) {
+      fixes.push(`Reordered beats question -> method -> findings: ${sorted.map((b) => b.pointId).join(", ")}`);
+      beats = sorted;
+    }
+  }
   // The payoff beat belongs last; moving it there has one right answer, so don't spend a rewrite on it.
-  const payoffAt = beats.findIndex((b) => b.pointId === script.payoffPointId);
+  const payoffAt = beats.findIndex((b) => b.pointId === payoffPointId);
   // (Not the first beat: it opens with where and when, so the model must rewrite that one.)
   if (payoffAt > 0 && payoffAt !== beats.length - 1) {
     beats = [...beats.slice(0, payoffAt), ...beats.slice(payoffAt + 1), beats[payoffAt]];
-    fixes.push(`Moved payoff beat ${script.payoffPointId} to the end`);
+    fixes.push(`Moved payoff beat ${payoffPointId} to the end`);
   }
   const fixed: Script = {
     ...script,
+    payoffPointId,
     hook: fix("Hook", script.hook),
     beats: beats.map((b) => {
       const text = fix(`Beat ${b.pointId}`, b.text);
@@ -316,8 +441,22 @@ export function checkScript(
   maxWords: number,
   sourceOpening = "",
   setting = "",
+  audience: Audience = "social",
 ): string[] {
   const problems: string[] = [];
+  const jargonWords = audience === "student" ? STUDENT_JARGON : JARGON;
+
+  // Student videos tell the study in order: the question, how it was tested, then the findings.
+  if (audience === "student") {
+    const rank = (id: string) => {
+      const t = points.find((p) => p.id === id)?.type;
+      return t === "question" ? 0 : t === "method" ? 1 : 2;
+    };
+    const ranks = script.beats.map((b) => rank(b.pointId));
+    if (ranks.some((r, i) => i > 0 && r < ranks[i - 1])) {
+      problems.push("Order: put the question beat first, then the method beats, then the findings.");
+    }
+  }
 
   // Any order (the script tells the story), but each chosen point exactly once, payoff last.
   const expectedIds = points.map((p) => p.id);
@@ -337,9 +476,14 @@ export function checkScript(
   const byId = new Map(points.map((p) => [p.id, new Set(pointNumbers(`${p.text} ${p.evidence}`))]));
   // Where and when: the study's years (setting) and counts (setting or opening) may be said anywhere.
   const years = yearsIn(setting);
+  // Numbers in the setting's own values are verified against the article, so they may be said with
+  // any noun. Testing: the sample "822 driver's license candidates" was said as "822 people".
+  const settingValues = new Set(
+    [...setting.matchAll(/^(?:Place|Period|Sample): (.*?) \(article: /gm)].flatMap((m) => numbersIn(m[1])),
+  );
   const context = `${sourceOpening}\n${setting}`.trim();
   const fromOpening = (n: string, text: string) =>
-    years.has(n) || (context !== "" && numberInContext(n, text, context));
+    years.has(n) || settingValues.has(n) || (context !== "" && numberInContext(n, text, context));
 
   for (const beat of script.beats) {
     const allowed = byId.get(beat.pointId) ?? new Set<string>();
@@ -366,7 +510,7 @@ export function checkScript(
     if (/\d\s*[-–—]\s*\d/.test(text)) problems.push(`${label} writes a range with a dash; write "9 to 12", not "9-12".`);
     if (SPELLED_NUMBER.test(text)) problems.push(`${label} spells a number in words; use digits.`);
     if (SYMBOLS.test(text)) problems.push(`${label} contains symbols or abbreviations that read badly aloud.`);
-    const jargon = [...new Set((text.match(JARGON) ?? []).map((w) => w.toLowerCase()))];
+    const jargon = [...new Set((text.match(jargonWords) ?? []).map((w) => w.toLowerCase()))];
     if (jargon.length) {
       problems.push(`Jargon: ${label} uses ${jargon.map((w) => `"${w}"`).join(", ")}; say it in everyday words.`);
     }
