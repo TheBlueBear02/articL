@@ -27,7 +27,8 @@ import {
   type BottomSource,
   type CompositionExtras,
 } from "@/render/composition";
-import { extractThumbnail, probeDuration, projectDir, readRenderStatus, startRender, VIDEO_FILE, writeProject } from "@/render/local";
+import { coverTime, saveCover } from "@/render/cover";
+import { extractFrame, extractThumbnail, probeDuration, projectDir, readRenderStatus, startRender, VIDEO_FILE, writeProject } from "@/render/local";
 import { defaultRenderTarget, getCloudRender, startCloudRender, uploadZip, zipProject } from "@/lib/heygen";
 import { saveTokens, saveUsage } from "@/lib/usage-db";
 import { downloadLibraryFile, listGameplay, listMusic, pickFor, trackCredit } from "@/lib/library";
@@ -116,6 +117,13 @@ async function pickPopups(
     }
   }
   return out;
+}
+
+/** The cover the user picked while it rendered (/create flow), else 1 s in. */
+async function chosenCoverTime(jobId: string): Promise<number> {
+  const { data, error } = await supabaseAdmin().from("jobs").select("segments, cover_segment").eq("id", jobId).single();
+  if (error || data?.cover_segment == null || !data.segments) return 1;
+  return coverTime(data.segments as Segment[], data.cover_segment);
 }
 
 const POLL_EVERY = "20s";
@@ -396,9 +404,15 @@ export const renderVideo = inngest.createFunction(
       // This computer (free) or HeyGen Cloud (paid per minute): the job's choice, else RENDER_MODE.
       const target: RenderTarget = (await readAddons(jobId)).render ?? defaultRenderTarget();
       if (target === "local") await startRender(dir);
+      // Each part's first shot, for the build tracker's thumbnails (/create flow).
+      const blocks = segments.map((_, i) => {
+        const g = shots.findIndex((sh) => sh.segment === i);
+        return g < 0 ? null : { file: media[g].path, video: broll[g].kind === "video", at: broll[g].mediaStart ?? 0 };
+      });
       return {
         target,
         dir,
+        blocks,
         duration: timeline.duration,
         shots: shots.length,
         music: !!music,
@@ -410,6 +424,32 @@ export const renderVideo = inngest.createFunction(
     });
 
     const dir = projectDir(jobId); // deterministic, so safe outside a step
+    // /create flow: one small frame per script part, shown in the build tracker while it renders.
+    await step.run("block-thumbs", async () => {
+      const { data } = await supabaseAdmin().from("jobs").select("flow").eq("id", jobId).single();
+      if (data?.flow !== "create") return { skipped: true };
+      const paths: (string | null)[] = [];
+      for (const [i, b] of started.blocks.entries()) {
+        if (!b) {
+          paths.push(null);
+          continue;
+        }
+        try {
+          const frame = await extractFrame(path.join(dir, b.file), b.video ? b.at + 0.5 : null);
+          const storagePath = `${jobId}/block-${i}.jpg`;
+          const { error } = await supabaseAdmin()
+            .storage.from(MEDIA_BUCKET)
+            .upload(storagePath, frame, { contentType: "image/jpeg", upsert: true });
+          if (error) throw new Error(error.message);
+          paths.push(storagePath);
+        } catch (e) {
+          console.warn(`[render-video] no thumbnail for part ${i} of ${jobId}: ${e instanceof Error ? e.message : e}`);
+          paths.push(null);
+        }
+      }
+      await setJob(jobId, { block_thumbs: paths });
+      return { thumbs: paths.filter(Boolean).length };
+    });
     if (started.target === "cloud") return renderInCloud(jobId, dir, step);
 
     // Poll the detached render process; mirror its progress to the job for the page.
@@ -440,7 +480,7 @@ export const renderVideo = inngest.createFunction(
       // The home page carousel's card: free and under a second (the video is already on disk).
       // A missing thumbnail never fails the job; the card then shows the hook title instead.
       try {
-        const thumb = await extractThumbnail(path.join(dir, VIDEO_FILE));
+        const thumb = await extractThumbnail(path.join(dir, VIDEO_FILE), await chosenCoverTime(jobId));
         const { error: thumbError } = await supabaseAdmin()
           .storage.from(MEDIA_BUCKET)
           .upload(`${jobId}/thumb.jpg`, thumb, { contentType: "image/jpeg", upsert: true });
@@ -520,6 +560,13 @@ async function renderInCloud(
     }
     // Billed per minute of output video (the timing panel shows the estimate).
     if (done.duration) await saveUsage(jobId, "render:cloud", { renderSeconds: done.duration });
+    // /create flow: a cover the user picked while it rendered replaces HeyGen's thumbnail.
+    const { data: picked } = await supabaseAdmin().from("jobs").select("cover_segment").eq("id", jobId).single();
+    if (picked?.cover_segment != null) {
+      await saveCover(jobId, { bytes: video.bytes }, await chosenCoverTime(jobId)).catch((e) =>
+        console.warn(`[render-video] cover not saved for ${jobId}: ${e instanceof Error ? e.message : e}`),
+      );
+    }
     await setJob(jobId, { status: "rendered", render_progress: 100, video_path: storagePath });
     await rm(dir, { recursive: true, force: true });
     return storagePath;

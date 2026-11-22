@@ -17,7 +17,10 @@ import { textToSpeech, transcribeWords } from "@/lib/voice";
 import { prefetchFootage } from "./footage";
 import { saveTokens, saveUsage, tokensOf } from "@/lib/usage-db";
 import type { TokenUsage } from "@/lib/pricing";
-import { audienceOf, type CandidatePoint, type Script, type Segment, type StudySetting } from "@/lib/jobs";
+import { audienceOf, type Audience, type CandidatePoint, type ChosenHook, type Script, type Segment, type StudySetting } from "@/lib/jobs";
+import type { FixedParts } from "@/lib/script";
+import { checkOverclaims } from "@/lib/overclaim";
+import { titleOf, videoOrder } from "@/lib/create-flow";
 
 const DRAFT_ATTEMPTS = 3; // the reel-structure checks (loop lead-in, hashtags) reject more first drafts
 
@@ -43,6 +46,9 @@ export const produceVoice = inngest.createFunction(
     // recording than the aim gets one shorter rewrite; a little over beats a failed run.
     const { maxWords: startWords, targetS: MAX_DURATION_S, hardMaxS: HARD_MAX_DURATION_S, ttsSpeed } = lengthFor(audience);
     let maxWords = startWords;
+    // /create flow: the user already chose the hook, lead finding and order; the script keeps them,
+    // and the job waits for script review instead of rendering straight away.
+    const fixed = await step.run("read-fixed-parts", () => readFixedParts(jobId, audience));
     /** Round 1's checked, recorded version, kept in case the shorter rewrite fails. */
     let previous: { segments: Segment[]; total: number; script: Script } | null = null;
 
@@ -70,15 +76,25 @@ export const produceVoice = inngest.createFunction(
         // Abstract and start of the introduction: enough to say where and when the study took place.
         const opening = text.slice(0, 3000);
 
+        const checkOpts = { allowQuestionHook: !!fixed?.questionHook };
         let feedback: string[] = [];
         const calls: TokenUsage[] = []; // every draft attempt is billed, passed or not
         for (let attempt = 1; attempt <= DRAFT_ATTEMPTS; attempt++) {
-          const { script: raw, usage, model } = await draftScript({ title, opening, points, setting, maxWords, feedback, audience });
+          const { script: raw, usage, model } = await draftScript({
+            title,
+            opening,
+            points,
+            setting,
+            maxWords,
+            feedback,
+            audience,
+            fixed: fixed ?? undefined,
+          });
           calls.push(tokensOf(model, usage));
           // Slips with one right answer are corrected, not sent back for a rewrite.
           let { script: drafted } = autoFixScript(raw, points, audience);
           const source = `${title}\n${opening}`;
-          feedback = checkScript(drafted, points, maxWords, source, settingText, audience);
+          feedback = checkScript(drafted, points, maxWords, source, settingText, audience, checkOpts);
           // Last try: if only the optional on-screen title or post caption still fail, leave those
           // out rather than fail the whole video, and accept a script that's a little short.
           // Spoken-script problems still fail the run.
@@ -89,7 +105,7 @@ export const produceVoice = inngest.createFunction(
               hookTitle: feedback.some((p) => p.startsWith("Hook title")) ? undefined : drafted.hookTitle,
               postCaption: feedback.some((p) => p.startsWith("Post caption")) ? undefined : drafted.postCaption,
             };
-            feedback = checkScript(drafted, points, maxWords, source, settingText, audience).filter((p) => !SOFT_PROBLEM.test(p));
+            feedback = checkScript(drafted, points, maxWords, source, settingText, audience, checkOpts).filter((p) => !SOFT_PROBLEM.test(p));
           }
           if (!feedback.length) {
             const script = { ...drafted, sourceCredit: verifyCredit(drafted.sourceCredit, text) };
@@ -110,7 +126,8 @@ export const produceVoice = inngest.createFunction(
         await step.run("save-voice-fallback", () =>
           setJob(jobId, { status: "voiced", segments: kept.segments, total_duration_s: kept.total, error: null }),
         );
-        await step.sendEvent("start-render", { name: VOICE_READY, data: { jobId } });
+        if (fixed) await step.run("check-claims", () => checkClaimsForReview(jobId, audience, startWords));
+        else await step.sendEvent("start-render", { name: VOICE_READY, data: { jobId } });
         return { jobId, ok: true, total: kept.total, rounds: round, fallback: draft.problems };
       }
       if (!draft.ok) {
@@ -171,7 +188,8 @@ export const produceVoice = inngest.createFunction(
           }),
         );
         // Hand off to Phase 4 (b-roll + render).
-        if (ok) await step.sendEvent("start-render", { name: VOICE_READY, data: { jobId } });
+        if (ok && fixed) await step.run("check-claims", () => checkClaimsForReview(jobId, audience, maxWords));
+        else if (ok) await step.sendEvent("start-render", { name: VOICE_READY, data: { jobId } });
         return { jobId, ok, total: best.total, rounds: round, draftAttempts: draft.attempt };
       }
       previous = { segments, total, script };
@@ -181,3 +199,56 @@ export const produceVoice = inngest.createFunction(
     }
   },
 );
+
+/** The /create flow's chosen hook, lead and beat order; null for jobs from the original page. */
+async function readFixedParts(jobId: string, audience: Audience): Promise<FixedParts | null> {
+  const { data, error } = await supabaseAdmin()
+    .from("jobs")
+    .select("flow, chosen_hook, lead_point_id, selected_point_ids, candidate_points")
+    .eq("id", jobId)
+    .single();
+  if (error || data?.flow !== "create" || !data.chosen_hook || !data.lead_point_id) return null;
+  const hook = data.chosen_hook as ChosenHook;
+  const order = videoOrder(data.candidate_points ?? [], data.selected_point_ids ?? [], data.lead_point_id, audience);
+  return {
+    hook: hook.hook,
+    hookTitle: hook.hookTitle,
+    payoffPointId: data.lead_point_id,
+    order,
+    questionHook: audience === "student" && hook.hook.includes("?"),
+  };
+}
+
+/**
+ * /create flow: flag lines that claim more than their sources, then wait for the user's review.
+ * The check never fails the video: without it the script is shown with no flags.
+ */
+async function checkClaimsForReview(jobId: string, audience: Audience, maxWords: number) {
+  const { data: job, error } = await supabaseAdmin()
+    .from("jobs")
+    .select("script, candidate_points, selected_point_ids, study_setting, extracted_text, chosen_hook")
+    .eq("id", jobId)
+    .single();
+  if (error || !job?.script) throw new Error(`Job ${jobId} has no script: ${error?.message}`);
+  const all = (job.candidate_points ?? []) as CandidatePoint[];
+  const points = ((job.selected_point_ids ?? []) as string[]).map((id) => all.find((p) => p.id === id)).filter((p): p is CandidatePoint => !!p);
+  const text: string = job.extracted_text ?? "";
+  let flags: import("@/lib/jobs").ScriptFlag[] = [];
+  try {
+    const res = await checkOverclaims(job.script as Script, {
+      points,
+      maxWords,
+      source: `${titleOf(text)}
+${text.slice(0, 3000)}`,
+      setting: job.study_setting as StudySetting | null,
+      audience,
+      allowQuestionHook: audience === "student" && String((job.chosen_hook as ChosenHook | null)?.hook ?? "").includes("?"),
+    });
+    flags = res.flags;
+    await saveTokens(jobId, "claims:1", [tokensOf(res.model, res.usage)]);
+  } catch (e) {
+    console.warn(`[produce-voice] overclaim check skipped for ${jobId}: ${e instanceof Error ? e.message : e}`);
+  }
+  await setJob(jobId, { status: "awaiting_review", script_flags: flags });
+  return { flags: flags.length };
+}

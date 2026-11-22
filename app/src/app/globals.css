@@ -26,3 +26,68 @@ body {
   color: var(--foreground);
   font-family: var(--font-sans), ui-sans-serif, sans-serif;
 }
+
+/* ---- /create flow: always light, brand yellow accents, small motion ---- */
+.a2r {
+  --a2r-ink: #111111;
+  --a2r-muted: #6b6b6b;
+  --a2r-line: #ececec;
+  --a2r-soft: #f7f7f5;
+  --a2r-brand: var(--brand);
+  --a2r-brand-strong: #f2c200;
+  --a2r-brand-tint: #fff8d6;
+  --a2r-warn: #e8590c;
+  --a2r-ease: cubic-bezier(0.2, 0.7, 0.2, 1);
+  background: #ffffff;
+  color: var(--a2r-ink);
+  color-scheme: light;
+}
+
+@keyframes a2r-in-next {
+  from { opacity: 0; transform: translateX(14px); }
+  to { opacity: 1; transform: none; }
+}
+@keyframes a2r-in-back {
+  from { opacity: 0; transform: translateX(-14px); }
+  to { opacity: 1; transform: none; }
+}
+@keyframes a2r-rise {
+  from { opacity: 0; transform: translateY(8px); }
+  to { opacity: 1; transform: none; }
+}
+@keyframes a2r-shimmer {
+  from { background-position: -200% 0; }
+  to { background-position: 200% 0; }
+}
+@keyframes a2r-pop {
+  0% { transform: scale(0.6); opacity: 0; }
+  60% { transform: scale(1.12); opacity: 1; }
+  100% { transform: scale(1); }
+}
+@keyframes a2r-pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.35; }
+}
+
+.a2r-step-next { animation: a2r-in-next 300ms var(--a2r-ease) backwards; }
+.a2r-step-back { animation: a2r-in-back 300ms var(--a2r-ease) backwards; }
+.a2r-rise { animation: a2r-rise 420ms var(--a2r-ease) both; animation-delay: calc(var(--i, 0) * 45ms); }
+.a2r-pop { animation: a2r-pop 360ms var(--a2r-ease) both; }
+.a2r-pulse { animation: a2r-pulse 1.4s ease-in-out infinite; }
+.a2r-skeleton {
+  background: linear-gradient(90deg, #f1f1ef 0%, #fafaf8 40%, #f1f1ef 80%);
+  background-size: 200% 100%;
+  animation: a2r-shimmer 1.6s linear infinite;
+}
+.a2r-fold { display: grid; grid-template-rows: 0fr; transition: grid-template-rows 320ms var(--a2r-ease); }
+.a2r-fold[data-open="true"] { grid-template-rows: 1fr; }
+.a2r-fold > * { overflow: hidden; min-height: 0; }
+.a2r-scroll { scrollbar-width: thin; scrollbar-color: #e2e2e2 transparent; overscroll-behavior: contain; }
+.a2r-noscrollbar { scrollbar-width: none; }
+.a2r-noscrollbar::-webkit-scrollbar { display: none; }
+
+@media (prefers-reduced-motion: reduce) {
+  .a2r-step-next, .a2r-step-back, .a2r-rise, .a2r-pop, .a2r-pulse, .a2r-skeleton { animation: none !important; }
+  .a2r-fold { transition: none; }
+  .a2r * { transition-duration: 0ms !important; }
+}

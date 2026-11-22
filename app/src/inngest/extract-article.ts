@@ -1,16 +1,12 @@
 import { extractText, getDocumentProxy } from "unpdf";
-import { inngest, ARTICLE_UPLOADED, type ArticleUploadedData } from "./client";
+import { inngest, ARTICLE_UPLOADED, AUDIENCE_CHOSEN, HOOKS_REQUESTED, type ArticleUploadedData, type AudienceChosenData } from "./client";
 import { supabaseAdmin, ARTICLES_BUCKET } from "@/lib/supabase/server";
 import { setJob } from "@/lib/supabase/jobs-db";
-import { proposePoints } from "@/lib/openai";
-import { applyRecommendations, trimBackMatter, verifyPoints, verifySetting } from "@/lib/points";
-import { audienceOf, MAX_SELECTED_POINTS, type CandidatePoint, type StudySetting } from "@/lib/jobs";
+import { proposeForJob } from "@/lib/propose";
+import { readPaperMeta } from "@/lib/paper-meta";
+import { generateHooksForJob } from "@/lib/create-flow";
 import { cleanText, MIN_TEXT_CHARS } from "@/lib/text";
 import { saveTokens, tokensOf } from "@/lib/usage-db";
-import type { TokenUsage } from "@/lib/pricing";
-
-// Below this many verified points the checklist isn't useful; ask the model once more.
-const MIN_VERIFIED_POINTS = 3;
 
 export const extractArticle = inngest.createFunction(
   {
@@ -76,65 +72,87 @@ export const extractArticle = inngest.createFunction(
 
     if (!summary.ok) return { jobId, ...summary };
 
-    // Ask the model for candidate points and keep only those the article supports.
-    // Reads the text from the database rather than passing it through step state.
-    const proposal = await step.run("propose-points", async () => {
-      await setJob(jobId, { status: "proposing" });
-      const { data, error } = await supabaseAdmin().from("jobs").select("extracted_text").eq("id", jobId).single();
-      if (error || !data?.extracted_text) throw new Error(`Reading text for job ${jobId} failed: ${error?.message}`);
-      const fullText: string = data.extracted_text;
-      const articleText = trimBackMatter(fullText);
-      // Separate query so jobs keep working before migration 0008 adds the column.
-      const { data: who } = await supabaseAdmin().from("jobs").select("audience").eq("id", jobId).single();
-      const audience = audienceOf(who ?? {});
-
-      const usage = [];
-      const calls: TokenUsage[] = []; // both attempts are billed, even when the first is kept
-      let kept: CandidatePoint[] = [];
-      let dropped: { reason: string; text: string }[] = [];
-      let setting: StudySetting = {};
-      // Student videos also need their main result and research question to pass the checks: if
-      // either was dropped, ask once more and keep the better attempt. Testing (Olken): the main
-      // audit result failed the number check in 3 runs out of 3, so the videos missed it.
-      const complete = (k: CandidatePoint[]) =>
-        audience !== "student" || (k.some((p) => p.main) && k.some((p) => p.type === "question"));
-      const score = (k: CandidatePoint[]) => (k.length >= MIN_VERIFIED_POINTS ? 2 : 0) + (complete(k) ? 1 : 0);
-      for (let attempt = 1; attempt <= 2 && !(kept.length >= MIN_VERIFIED_POINTS && complete(kept)); attempt++) {
-        const result = await proposePoints(articleText, audience);
-        usage.push({ model: result.model, ...result.usage });
-        calls.push(tokensOf(result.model, result.usage));
-        const withIds = result.points.map((p, i) => ({ id: `p${i + 1}`, ...p }));
-        const verified = verifyPoints(withIds, fullText);
-        if (attempt > 1 && score(verified.kept) < score(kept)) continue; // the first attempt was better
-        kept = verified.kept;
-        dropped = verified.dropped.map((d) => ({ reason: d.reason, text: d.point.text }));
-        setting = verifySetting(result.setting, fullText);
-      }
-
-      await saveTokens(jobId, "points:1", calls);
-
-      if (kept.length < MIN_VERIFIED_POINTS) {
-        await setJob(jobId, {
-          status: "failed",
-          error: "Couldn't find enough points that could be checked against the article text. Try another article.",
-        });
-        return { ok: false, kept: kept.length, dropped, usage };
-      }
-
-      // Auto-mark the best points (recommended first), then renumber so ids are tidy.
-      // Wait here for the user to submit add-ons (Continue); scripting starts from /select.
-      const points = applyRecommendations(kept, MAX_SELECTED_POINTS, audience).map((p, i) => ({ ...p, id: `p${i + 1}` }));
-      try {
-        await setJob(jobId, { status: "awaiting_selection", candidate_points: points, study_setting: setting });
-      } catch (e) {
-        // Before migration 0007 there is no study_setting column: save the points without it.
-        if (!/study_setting/.test(String(e))) throw e;
-        await setJob(jobId, { status: "awaiting_selection", candidate_points: points });
-      }
-      const modelRecommended = kept.filter((p) => p.recommended).length;
-      return { ok: true, kept: points.length, modelRecommended, dropped, setting, usage };
+    // /create flow: read the title and authors for the "Reading your paper" card, then wait for the
+    // audience if it hasn't been chosen yet (POST /audience then sends AUDIENCE_CHOSEN).
+    const flow = await step.run("read-flow", async () => {
+      const { data } = await supabaseAdmin().from("jobs").select("flow").eq("id", jobId).single();
+      return (data?.flow as string | null) ?? null;
     });
+    if (flow === "create") {
+      await step.run("read-paper-meta", async () => {
+        const { data } = await supabaseAdmin().from("jobs").select("extracted_text").eq("id", jobId).single();
+        try {
+          const { meta, usage, model } = await readPaperMeta(data?.extracted_text ?? "");
+          await setJob(jobId, { paper_meta: meta });
+          await saveTokens(jobId, "meta:1", [tokensOf(model, usage)]);
+          return meta;
+        } catch (e) {
+          // The card then shows the file name; never worth failing the job over.
+          console.warn(`[extract-article] no paper meta for ${jobId}: ${e instanceof Error ? e.message : e}`);
+          return null;
+        }
+      });
+      // Atomic: only waits if the audience still isn't confirmed. If POST /audience got there first,
+      // nothing is updated and the points are found right away.
+      const waiting = await step.run("wait-for-audience", async () => {
+        const { data } = await supabaseAdmin()
+          .from("jobs")
+          .update({ status: "awaiting_audience" })
+          .eq("id", jobId)
+          .eq("audience_confirmed", false)
+          .select("id");
+        return !!data?.length;
+      });
+      if (waiting) return { jobId, ...summary, waitingForAudience: true };
+      const proposal = await step.run("propose-points", () => proposeForJob(jobId, "awaiting_findings"));
+      if (proposal.ok) await step.sendEvent("write-hooks", { name: HOOKS_REQUESTED, data: { jobId } });
+      return { jobId, ...summary, proposal };
+    }
+
+    // Ask the model for candidate points and keep only those the article supports, then wait for
+    // the user to submit add-ons (Continue); scripting starts from /select.
+    const proposal = await step.run("propose-points", () => proposeForJob(jobId, "awaiting_selection"));
 
     return { jobId, ...summary, proposal };
+  },
+);
+
+// /create flow: the audience was chosen after the text was read (or the user asked for new
+// findings): find and rank the points, then write hooks for the top one in the background.
+export const proposeFindings = inngest.createFunction(
+  {
+    id: "propose-findings",
+    triggers: [{ event: AUDIENCE_CHOSEN }],
+    retries: 2,
+    onFailure: async ({ event, error }) => {
+      const { jobId } = event.data.event.data as AudienceChosenData;
+      await setJob(jobId, { status: "failed", error: error.message });
+    },
+  },
+  async ({ event, step }) => {
+    const { jobId } = event.data as AudienceChosenData;
+    const proposal = await step.run("propose-points", () => proposeForJob(jobId, "awaiting_findings"));
+    if (proposal.ok) await step.sendEvent("write-hooks", { name: HOOKS_REQUESTED, data: { jobId } });
+    return { jobId, proposal };
+  },
+);
+
+// /create flow: hook options for the lead finding. A failure leaves the hooks empty (the page offers
+// "Try again" and "Write your own") rather than failing the job.
+export const writeHooks = inngest.createFunction(
+  { id: "write-hooks", triggers: [{ event: HOOKS_REQUESTED }], retries: 1 },
+  async ({ event, step }) => {
+    const { jobId, more = 0 } = event.data as { jobId: string; more?: number };
+    try {
+      return await step.run("write-hooks", () => generateHooksForJob(jobId, more));
+    } catch (e) {
+      await step.run("save-no-hooks", async () => {
+        if (!more) return setJob(jobId, { hooks: { leadId: "", pointIds: [], items: [], failed: true } });
+        // "More hooks" failed: keep the hooks already shown.
+        const { data } = await supabaseAdmin().from("jobs").select("hooks").eq("id", jobId).single();
+        if (data?.hooks) await setJob(jobId, { hooks: { ...data.hooks, pending: false, moreFailed: true } });
+      });
+      return { jobId, failed: e instanceof Error ? e.message : String(e) };
+    }
   },
 );

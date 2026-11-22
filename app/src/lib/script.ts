@@ -225,6 +225,19 @@ export type DraftInput = {
   feedback?: string[];
   /** Who the video is for; "student" tells it as question -> method -> findings. */
   audience?: Audience;
+  /** /create flow: the hook, lead finding and beat order the user already chose. */
+  fixed?: FixedParts;
+};
+
+export type FixedParts = {
+  hook: string;
+  hookTitle: string;
+  /** The lead finding: the payoff, last beat. */
+  payoffPointId: string;
+  /** Beat order (point ids), lead last. */
+  order: string[];
+  /** Student question hook: the closing leads into a question. */
+  questionHook?: boolean;
 };
 
 export async function draftScript(input: DraftInput): Promise<{ script: Script; usage: Usage; model: string }> {
@@ -238,6 +251,16 @@ export async function draftScript(input: DraftInput): Promise<{ script: Script; 
   const plan =
     `\n\nBEATS NEEDED: exactly ${ids.length}, one for each of ${ids.join(", ")}; leave none out.` +
     `\nWORD BUDGET: hook about 15 words, each beat about ${perBeat} words, closing about 15 words.`;
+  const fixed = input.fixed
+    ? `\n\nALREADY CHOSEN (keep exactly):` +
+      `\n- hook: "${input.fixed.hook}"\n- hookTitle: "${input.fixed.hookTitle}"` +
+      `\n- payoffPointId: ${input.fixed.payoffPointId}` +
+      `\n- BEAT ORDER: ${input.fixed.order.join(", ")} (in exactly this order)` +
+      (input.fixed.questionHook
+        ? `\nThe hook is a question. The closing ends with an unfinished lead-in that the question` +
+          ` follows naturally on replay (e.g. "...which leaves one question").`
+        : "")
+    : "";
   const feedback = input.feedback?.length
     ? `\n\nYour previous draft was rejected. Fix these problems:\n- ${input.feedback.join("\n- ")}`
     : "";
@@ -249,7 +272,7 @@ export async function draftScript(input: DraftInput): Promise<{ script: Script; 
     ),
     user:
       `TITLE: ${input.title}\n\nOPENING OF THE ARTICLE:\n${input.opening}\n\n` +
-      `STUDY SETTING:\n${settingBlock(input.setting)}\n\nCHOSEN POINTS:\n${pointsBlock}${plan}${feedback}`,
+      `STUDY SETTING:\n${settingBlock(input.setting)}\n\nCHOSEN POINTS:\n${pointsBlock}${plan}${fixed}${feedback}`,
     schemaName: "reel_script",
     schema: SCHEMA,
   });
@@ -267,5 +290,18 @@ export async function draftScript(input: DraftInput): Promise<{ script: Script; 
       shots: tidyShots(b.shots, b.broll),
     })),
   };
-  return { script: data, usage, model };
+  return { script: input.fixed ? withFixedParts(data, input.fixed) : data, usage, model };
+}
+
+/** Put the user's hook, lead and beat order back in, whatever the model wrote. */
+function withFixedParts(script: Script, fixed: FixedParts): Script {
+  const byId = new Map(script.beats.map((b) => [b.pointId, b]));
+  const sameSet = script.beats.length === fixed.order.length && fixed.order.every((id) => byId.has(id));
+  return {
+    ...script,
+    hook: fixed.hook,
+    hookTitle: fixed.hookTitle,
+    payoffPointId: fixed.payoffPointId,
+    beats: sameSet ? fixed.order.map((id) => byId.get(id)!) : script.beats,
+  };
 }

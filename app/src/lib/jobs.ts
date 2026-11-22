@@ -3,19 +3,30 @@ export type JobStatus =
   | "uploaded"
   | "extracting"
   | "extracted"
+  | "awaiting_audience"
   | "proposing"
   | "awaiting_selection"
+  | "awaiting_findings"
+  | "awaiting_hook"
   | "points_selected"
   | "scripting"
   | "voicing"
   | "voiced"
+  | "awaiting_review"
   | "fetching_broll"
   | "rendering"
   | "rendered"
   | "failed";
 
 // Statuses after which the job won't change again without user action.
-export const SETTLED_STATUSES: JobStatus[] = ["awaiting_selection", "rendered", "failed"];
+export const SETTLED_STATUSES: JobStatus[] = [
+  "awaiting_selection",
+  "awaiting_audience",
+  "awaiting_findings",
+  "awaiting_review",
+  "rendered",
+  "failed",
+];
 
 /** Short labels for the job page and My videos list. */
 export const STATUS_LABEL: Record<JobStatus, string> = {
@@ -23,12 +34,16 @@ export const STATUS_LABEL: Record<JobStatus, string> = {
   uploaded: "Uploaded, waiting to start…",
   extracting: "Extracting text…",
   extracted: "Text extracted",
+  awaiting_audience: "Choose the audience",
   proposing: "Finding key points…",
   awaiting_selection: "Confirm add-ons",
+  awaiting_findings: "Confirm the findings",
+  awaiting_hook: "Choose a hook",
   points_selected: "Points saved",
   scripting: "Writing the script…",
   voicing: "Recording the voiceover…",
   voiced: "Voiceover ready",
+  awaiting_review: "Review the script",
   fetching_broll: "Finding visual materials…",
   rendering: "Rendering the video…",
   rendered: "Video ready",
@@ -300,6 +315,19 @@ export type Job = {
   /** Missing on rows from before migration 0005. */
   addons?: Addons | null;
   addon_media?: AddonMedia | null;
+  // ---- The /create flow (migration 0010); missing or null on other jobs ----
+  flow?: "create" | null;
+  audience_confirmed?: boolean;
+  paper_meta?: PaperMeta | null;
+  lead_point_id?: string | null;
+  hooks?: HookSet | null;
+  chosen_hook?: ChosenHook | null;
+  author_info?: AuthorInfo | null;
+  addons_confirmed_at?: string | null;
+  script_flags?: ScriptFlag[] | null;
+  block_thumbs?: (string | null)[] | null;
+  cover_segment?: number | null;
+  post_texts?: PostTexts | null;
   /** When each status was first entered (migration 0006); missing on older rows. */
   stage_times?: Partial<Record<JobStatus | "created", string>> | null;
   error: string | null;
@@ -309,3 +337,56 @@ export type Job = {
 
 export const MAX_PDF_BYTES = 20 * 1024 * 1024;
 export const MAX_SELECTED_POINTS = 5;
+
+// ---- The /create flow (migration 0010) ----
+
+/** Title and authors read from the paper's first page (each found in the text), plus a DOI if printed. */
+export type PaperMeta = { title?: string; authors?: string[]; year?: string; doi?: string };
+
+/** Hook kinds, 3 per video. Social: a surprising number, a myth-buster and one about the viewer.
+ *  Student: a surprising number, a question and a myth-buster. */
+export const HOOK_TYPES = ["number", "myth", "you", "question"] as const;
+export type HookType = (typeof HOOK_TYPES)[number];
+export const HOOK_TYPE_LABEL: Record<HookType, string> = {
+  number: "Surprising number",
+  myth: "Myth-buster",
+  you: "About you",
+  question: "Question",
+};
+export const hookTypesFor = (audience: Audience): HookType[] =>
+  audience === "student" ? ["number", "question", "myth"] : ["number", "myth", "you"];
+
+export type HookOption = {
+  type: HookType;
+  /** Spoken opening line. */
+  hook: string;
+  /** On-screen text, at most 7 words. */
+  hookTitle: string;
+  /** The point whose quote backs it up, and that quote (copied from the point's evidence). */
+  pointId: string;
+  quote: string;
+};
+/** Hooks written for one lead finding and set of points; regenerated when either changes. */
+export type HookSet = {
+  leadId: string;
+  pointIds: string[];
+  items: HookOption[];
+  failed?: boolean;
+  /** "More hooks" is writing extra options (they are added under the existing ones). */
+  pending?: boolean;
+  /** The last "More hooks" found nothing that passed the checks. */
+  moreFailed?: boolean;
+};
+export type ChosenHook = { type: HookType | "custom"; hook: string; hookTitle: string };
+
+export type AuthorInfo = { name?: string; role?: string; university?: string };
+
+/** A script part the overclaim check flagged, with a softer wording that passed the number checks.
+ *  segment: 0 = hook, 1..n = beats, last = closing (the order they are recorded in). */
+export type ScriptFlag = { segment: number; problem: string; softer: string; state: "open" | "accepted" | "kept" };
+
+export const POST_PLATFORMS = ["instagram", "tiktok", "linkedin"] as const;
+export type PostPlatform = (typeof POST_PLATFORMS)[number];
+export type PostTexts = Partial<Record<PostPlatform, string>>;
+
+export const isFindingType = (t: PointType) => t !== "question" && t !== "method";

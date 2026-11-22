@@ -506,6 +506,8 @@ export function checkScript(
   sourceOpening = "",
   setting = "",
   audience: Audience = "social",
+  /** The /create flow lets Student videos open on a question hook (the closing then leads into it). */
+  opts: { allowQuestionHook?: boolean } = {},
 ): string[] {
   const problems: string[] = [];
   const jargonWords = audience === "student" ? STUDENT_JARGON : JARGON;
@@ -600,7 +602,7 @@ export function checkScript(
     problems.push(`Closing ends with punctuation; it must end with an unfinished lead-in that the hook's first words complete (e.g. "...and that is exactly why").`);
   }
   // A question hook can't complete the closing's lead-in ("...exactly why would a small test...?").
-  if (script.payoffPointId !== undefined && script.hook.includes("?")) {
+  if (script.payoffPointId !== undefined && script.hook.includes("?") && !opts.allowQuestionHook) {
     problems.push(`Hook is a question; make it a statement that completes the closing's last words as one sentence.`);
   }
   // Open loop: the hook teases the payoff, it doesn't give its number away. Testing: "elite picks fell

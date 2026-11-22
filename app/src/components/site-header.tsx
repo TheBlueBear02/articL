@@ -3,7 +3,7 @@ import Link from "next/link";
 
 export function SiteHeader() {
   return (
-    <header className="border-b border-neutral-200 bg-white dark:border-neutral-800 dark:bg-neutral-950">
+    <header className="site-header border-b border-neutral-200 bg-white dark:border-neutral-800 dark:bg-neutral-950">
       <div className="mx-auto flex w-full max-w-6xl items-center justify-between gap-4 px-4 py-1.5 sm:px-6 sm:py-2">
         <Link href="/" className="inline-flex items-center overflow-hidden" aria-label="ArticL home">
           {/* Crop the top 20% of the asset (empty padding in the JPG). */}

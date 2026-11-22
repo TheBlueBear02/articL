@@ -100,11 +100,21 @@ export async function probeDuration(content: Buffer, ext: string): Promise<numbe
  * A small JPEG thumbnail of a finished video: the frame at 1 s (the hook title over the opening
  * shot), 360x640, ~20-40 KB, for the home page carousel. Uses FFmpeg, which local renders need anyway.
  */
-export async function extractThumbnail(videoPath: string): Promise<Buffer> {
-  const out = path.join(tmpdir(), `articl-thumb-${process.pid}-${Date.now()}.jpg`);
+export async function extractThumbnail(videoPath: string, atSeconds = 1): Promise<Buffer> {
+  return extractFrame(videoPath, atSeconds);
+}
+
+/**
+ * One 360x640 JPEG frame from a video (at `atSeconds`) or a photo (atSeconds null), cropped to 9:16.
+ * Used for the carousel card, the cover the user picks and the build tracker's thumbnails.
+ */
+export async function extractFrame(input: string, atSeconds: number | null): Promise<Buffer> {
+  const out = path.join(tmpdir(), `articl-thumb-${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}.jpg`);
+  const seek = atSeconds == null ? [] : ["-ss", String(Math.max(0, atSeconds))];
   try {
     await new Promise<void>((resolve, reject) => {
-      const p = spawn("ffmpeg", ["-loglevel", "error", "-y", "-ss", "1", "-i", videoPath, "-frames:v", "1", "-vf", "scale=360:640", "-q:v", "5", out], {
+      const vf = "scale=360:640:force_original_aspect_ratio=increase,crop=360:640";
+      const p = spawn("ffmpeg", ["-loglevel", "error", "-y", ...seek, "-i", input, "-frames:v", "1", "-vf", vf, "-q:v", "5", out], {
         windowsHide: true,
       });
       let stderr = "";

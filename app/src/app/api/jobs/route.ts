@@ -25,7 +25,14 @@ export async function POST(request: Request) {
 
   const { error: insertError } = await supabase
     .from("jobs")
-    .insert({ id, original_filename: filename, file_path: filePath, ...audienceColumn(parsed.audience) });
+    // flow "create": the new mobile flow (/create), which asks for the audience after the upload.
+    .insert({
+      id,
+      original_filename: filename,
+      file_path: filePath,
+      ...audienceColumn(parsed.audience),
+      ...(body?.flow === "create" ? { flow: "create" } : {}),
+    });
   if (insertError) {
     return Response.json({ error: `Could not create job: ${insertError.message}` }, { status: 500 });
   }
