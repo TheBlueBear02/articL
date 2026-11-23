@@ -2,6 +2,7 @@ import "server-only";
 import { chatJson, type Usage } from "./openai";
 import { checkScript, settingBlock } from "./script-checks";
 import {
+  HOOK_TYPES,
   hookTypesFor,
   type Audience,
   type CandidatePoint,
@@ -21,9 +22,25 @@ const TYPE_RULES: Record<HookType, string> = {
   a driving test, this study is about you."), then teases the lead finding without its number.`,
   question: `"question": the research question in plain words, as a direct question to the viewer
   ("Can a single audit stop officials from stealing?"). The only type that may end with a question mark.`,
+  // LinkedIn (spec, Nov 23): viewers decide in 2-3 s, so tease without a slow build-up or clickbait.
+  tease: `"tease": the research question, then a one-line tease: "Do [X] really [Y]? A new study of
+  [N people or cases] says the answer is surprising." N comes from STUDY SETTING or a chosen point;
+  if no count is given, leave it out ("A new study says the answer is surprising."). Does not give
+  the lead finding's number away. May end its first sentence with a question mark.`,
+  finding: `"finding": opens straight on the lead finding with its number, as one plain statement
+  ("Audits cut missing road funds by 8 percentage points.").`,
+  problem: `"problem": the size of the problem first, then "A new study looked at why." (or "...at what
+  works."): "[N] people face [problem]. A new study looked at why." N must come from STUDY SETTING or
+  a chosen point; never invent a figure.`,
 };
 
-const SYSTEM = (types: HookType[]) => `You write the opening line (the hook) of a short vertical video about a research study.
+/** LinkedIn hooks may give the lead finding away (the "finding" type does) and use research terms. */
+const LINKEDIN_NOTE = `
+This video is a calm, professional LinkedIn summary for peers and policymakers: the lead finding is
+revealed in the middle, not at the end, so only the "tease" type keeps it back. Standard research
+terms ("randomized", "survey") are fine. No hype or exclamation marks.`;
+
+const SYSTEM = (types: HookType[], audience: Audience) => `You write the opening line (the hook) of a short vertical video about a research study.
 The hook has to stop the scroll within 2 seconds, and it teases the LEAD FINDING, which the video
 reveals at the end.
 
@@ -32,7 +49,7 @@ make the two clearly different):
 ${types.map((t) => `- ${TYPE_RULES[t]}`).join("\n")}
 
 For each:
-- hook: 1-2 short spoken sentences, about 15 words. A statement (except the question type).
+- hook: 1-2 short spoken sentences, about 15 words. A statement (except the question and tease types).
   No filler like "the answer might surprise you" or "you won't believe".
 - hookTitle: the hook as on-screen text, at most 7 words, no final punctuation.
 - pointId: the id of the chosen point whose source sentence backs the hook up.
@@ -43,7 +60,7 @@ Rules (checked automatically):
 - Plain spoken English for a text-to-speech voice: every number as digits ("6 weeks"), no symbols,
   abbreviations or parentheses, money as digits plus the currency word ("50 pounds").
 - Words a 12-year-old knows; no research jargon ("randomized", "statistically significant").
-- Never mention the video itself ("in this video", "at the end", "payoff").`;
+- Never mention the video itself ("in this video", "at the end", "payoff").${audience === "academic" ? LINKEDIN_NOTE : ""}`;
 
 const SCHEMA = {
   type: "object",
@@ -57,7 +74,7 @@ const SCHEMA = {
         additionalProperties: false,
         required: ["type", "hook", "hookTitle", "pointId"],
         properties: {
-          type: { type: "string", enum: ["number", "myth", "you", "question"] },
+          type: { type: "string", enum: [...HOOK_TYPES] },
           hook: { type: "string" },
           hookTitle: { type: "string" },
           pointId: { type: "string" },
@@ -101,15 +118,17 @@ export function hookProblems(
     closing: "and that is why",
     closingBroll: "",
   };
-  const allowQuestionHook = input.audience === "student" && (hook.type === "question" || hook.type === "custom");
+  const allowQuestionHook =
+    (input.audience === "student" && (hook.type === "question" || hook.type === "custom")) ||
+    (input.audience === "academic" && (hook.type === "tease" || hook.type === "custom"));
   const problems = checkScript(probe, input.points, 150, `${input.title ?? ""}\n${input.opening}`, settingBlock(input.setting), input.audience, {
     allowQuestionHook,
   }).filter((p) => /^(Jargon: )?Hook\b|^Spoiler/.test(p));
   if (!hook.hook.trim()) problems.push("Hook is empty.");
   if (!hook.hookTitle.trim()) problems.push("Hook title is empty.");
-  // A question hook is only offered (and allowed) for Student videos.
-  if (hook.type !== "question" && input.audience !== "student" && hook.hook.includes("?")) {
-    problems.push("Hook is a question; for Social videos write it as a statement.");
+  // A question hook is only offered (and allowed) for Student videos and LinkedIn's tease.
+  if (!allowQuestionHook && hook.type !== "question" && input.audience !== "student" && hook.hook.includes("?")) {
+    problems.push("Hook is a question; write it as a statement.");
   }
   return [...new Set(problems)];
 }
@@ -141,7 +160,7 @@ export async function proposeHooks(
   for (let attempt = 1; attempt <= 2 && open().length > 0; attempt++) {
     const wanted = open().map((i) => types[i]);
     const res = await chatJson<{ hooks: { type: HookType; hook: string; hookTitle: string; pointId: string }[] }>({
-      system: SYSTEM(wanted),
+      system: SYSTEM(wanted, input.audience),
       user:
         `TITLE: ${input.title}\n\nOPENING OF THE ARTICLE:\n${input.opening}\n\nSTUDY SETTING:\n${settingBlock(input.setting)}\n\n` +
         `CHOSEN POINTS:\n${pointsBlock}${avoidBlock}${feedback}`,

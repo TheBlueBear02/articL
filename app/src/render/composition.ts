@@ -365,8 +365,9 @@ export function planPopups(
 }
 
 // ---- Map intro ----
-/** The map is on screen this long, from just before the place is said in the first beat. */
-const MAP_S = 2.8;
+/** The map is on screen this long, from just before the place is said in the first beat.
+ *  (Was 2.8 s, which held the zoomed-in country for only ~0.7 s; lengthened Nov 23.) */
+const MAP_S = 4.5;
 const MAP_MIN_S = 1.6;
 
 /**
@@ -1134,7 +1135,8 @@ ${musicHtml}${sfxHtml ? `\n${sfxHtml}` : ""}
         // callback, because GSAP skips callbacks when a renderer jumps straight to a frame (seek).
         const STEPS = 24;
         const ease = (x) => (x < 0.5 ? 2 * x * x : 1 - Math.pow(-2 * x + 2, 2) / 2);
-        const zoomEnd = Math.max(m.start + 0.8, m.end - 0.7);
+        // The zoom takes about 2 s (as before); the rest of the clip holds the country, pin and label.
+        const zoomEnd = Math.max(m.start + 0.8, Math.min(m.start + 2.1, m.end - 0.7));
         const stepDur = (zoomEnd - m.start) / STEPS;
         tl.fromTo("#mapwrap", { opacity: 0 }, { opacity: 1, duration: 0.3, ease: "power1.out" }, m.start);
         tl.set(svg, { attr: { viewBox: viewBox(0) } }, 0);

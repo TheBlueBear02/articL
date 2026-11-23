@@ -1,6 +1,6 @@
 // Phase 3: turn the selected points into a spoken script, and check it before recording.
 import { chatJson, type Usage } from "./openai";
-import { CHART_KINDS, type Audience, type CandidatePoint, type Script, type StudySetting } from "./jobs";
+import { CHART_KINDS, LINKEDIN_CLOSING, type Audience, type CandidatePoint, type Script, type StudySetting } from "./jobs";
 import { settingBlock, targetMinWords } from "./script-checks";
 export {
   autoFixScript,
@@ -130,6 +130,84 @@ After watching, the student should know:
   ],
 ].reduce((p, [from, to]) => swap(p, from, to), SYSTEM_PROMPT);
 
+// LinkedIn videos ("academic"): a calm ~90 s summary for peers and policymakers, in the spec's six
+// sections: opening (the hook) -> motivation -> method -> findings, main result first ->
+// limitation and implication -> a fixed closing line over the closing card. No loop: the video
+// ends on the card, so the closing is set in code (LINKEDIN_CLOSING), not written by the model.
+const LINKEDIN_PROMPT = [
+  [
+    SYSTEM_PROMPT.slice(0, SYSTEM_PROMPT.indexOf("You get the article's title")),
+    `You write the script for a calm, professional 90-second video that a researcher shares on LinkedIn
+to explain their study to peers and policymakers.
+
+After watching, the viewer should know:
+- why the question matters and what was not known before,
+- how the study was done: where, when and with whom (from STUDY SETTING) and the method,
+- the main finding with its number, and the other key findings,
+- what the study does not show, and what it suggests for policy, practice or the field.
+
+Tone: measured and precise, like a good conference talk. No hype, no clickbait, no exclamation marks.
+
+`,
+  ],
+  [
+    `- payoffPointId: the most surprising chosen point.`,
+    `- payoffPointId: the point marked "the main result" if there is one, otherwise the most important finding.`,
+  ],
+  [
+    `- hook: 1-2 statements that stop the scroll within 2 seconds: a surprising number or a
+  counter-intuitive claim. Never a question, and no filler like "the answer might surprise you".
+  Tease the payoff point without revealing its result.`,
+    `- hook: the opening, about 15 words, as given under ALREADY CHOSEN if there is one; otherwise a
+  question with a tease: "Do [X] really [Y]? A new study of [N people or cases] says the answer is
+  surprising."`,
+  ],
+  [
+    `- beats: exactly one per chosen point (pointId is that point's id; no extra beats), 1-3 sentences each, ordered as a story with the payoff point last.
+  The first beat opens with where, when and with whom the study was done (only what STUDY SETTING
+  gives), then its point; there is no separate setting beat. Start one middle beat with a short
+  re-hook such as "But here's the strange part".
+  The payoff beat states its key number.`,
+    `- beats: exactly one per chosen point (pointId is that point's id; no extra beats), in this order:
+  1. the "motivation" point: why this matters in the real world, then "But until now, [what we didn't
+     know or why it was hard to answer]." (2-3 sentences)
+  2. the "method" point(s): "To find out, the researchers [what they did] using [the data: who,
+     how many, when, where]." Say where, when and with whom only from STUDY SETTING. (2-3 sentences)
+  3. the payoff point (the main result) first among the findings: start with "Here's what they
+     found." and state its number, then the surprising part.
+  4. the other findings, each starting with a short link such as "They also found" or "And".
+  5. the "limitation" point last: "The study doesn't show [the limitation], but it suggests [why it
+     matters for policy, practice or the field]." The implication must follow from the chosen
+     points; never claim more than they say.`,
+  ],
+  [
+    `- closing: the takeaway in one sentence, ending with an unfinished lead-in (no final punctuation)
+  that the hook's first words complete, so closing + hook read as one sentence, e.g.
+  "...and that is exactly why" + "owning stocks can change how you vote." Never repeat the hook
+  or hook title inside the closing.`,
+    `- closing: write exactly "${LINKEDIN_CLOSING}" (it is spoken over the closing card with the paper's details).`,
+  ],
+  [
+    `- postCaption: 1-2 sentences on the main finding, a line asking viewers to share or comment,
+  then a line of 3 to 5 hashtags.`,
+    `- postCaption: the opening question, then "New research in [journal or field] has an answer."
+  and one sentence on the main finding, then "What would you have guessed?", then a line of 3 to 5
+  professional hashtags.`,
+  ],
+  [
+    `- If a 12-year-old wouldn't know a word (e.g. "randomized", "referenda", "socioeconomic",
+  "market exposure"), say it in everyday words instead.`,
+    `- Standard research terms ("randomized", "survey", "control group") are fine for this audience.
+  Explain anything more technical (e.g. "coefficients", "heterogeneity", "endline") in plain words.`,
+  ],
+].reduce((p, [from, to]) => swap(p, from, to), SYSTEM_PROMPT);
+
+/** System prompt for an audience, with the word range filled in. */
+function promptFor(audience: Audience | undefined, maxWords: number): string {
+  const base = audience === "student" ? STUDENT_PROMPT : audience === "academic" ? LINKEDIN_PROMPT : SYSTEM_PROMPT;
+  return base.replace("{MAX_WORDS}", String(maxWords)).replace("{MIN_WORDS}", String(targetMinWords(maxWords)));
+}
+
 const SHOTS = { type: "array", items: { type: "string" } };
 
 const SCHEMA = {
@@ -223,7 +301,8 @@ export type DraftInput = {
   maxWords: number;
   /** Problems with the previous attempt, so the model can fix them. */
   feedback?: string[];
-  /** Who the video is for; "student" tells it as question -> method -> findings. */
+  /** Who the video is for; "student" tells it as question -> method -> findings; "academic" (LinkedIn)
+   *  as motivation -> method -> findings -> limitation. */
   audience?: Audience;
   /** /create flow: the hook, lead finding and beat order the user already chose. */
   fixed?: FixedParts;
@@ -247,16 +326,18 @@ export async function draftScript(input: DraftInput): Promise<{ script: Script; 
   // Testing (Bertrand, 5 points): the model left a point out in 2 of 3 drafts and wrote 200 words for a
   // 150-word limit. Naming every beat and giving each part a word budget keeps both in check.
   const ids = input.points.map((p) => p.id);
-  const perBeat = Math.max(12, Math.floor((input.maxWords - 30) / Math.max(1, ids.length)));
+  const linkedin = input.audience === "academic";
+  // LinkedIn's closing is a fixed ~13-word line; the rest of the budget goes to the beats.
+  const perBeat = Math.max(12, Math.floor((input.maxWords - (linkedin ? 28 : 30)) / Math.max(1, ids.length)));
   const plan =
     `\n\nBEATS NEEDED: exactly ${ids.length}, one for each of ${ids.join(", ")}; leave none out.` +
-    `\nWORD BUDGET: hook about 15 words, each beat about ${perBeat} words, closing about 15 words.`;
+    `\nWORD BUDGET: hook about 15 words, each beat about ${perBeat} words, closing about ${linkedin ? 13 : 15} words.`;
   const fixed = input.fixed
     ? `\n\nALREADY CHOSEN (keep exactly):` +
       `\n- hook: "${input.fixed.hook}"\n- hookTitle: "${input.fixed.hookTitle}"` +
       `\n- payoffPointId: ${input.fixed.payoffPointId}` +
       `\n- BEAT ORDER: ${input.fixed.order.join(", ")} (in exactly this order)` +
-      (input.fixed.questionHook
+      (input.fixed.questionHook && !linkedin
         ? `\nThe hook is a question. The closing ends with an unfinished lead-in that the question` +
           ` follows naturally on replay (e.g. "...which leaves one question").`
         : "")
@@ -266,10 +347,7 @@ export async function draftScript(input: DraftInput): Promise<{ script: Script; 
     : "";
 
   const { data: raw, usage, model } = await chatJson<Script>({
-    system: (input.audience === "student" ? STUDENT_PROMPT : SYSTEM_PROMPT).replace("{MAX_WORDS}", String(input.maxWords)).replace(
-      "{MIN_WORDS}",
-      String(targetMinWords(input.maxWords)),
-    ),
+    system: promptFor(input.audience, input.maxWords),
     user:
       `TITLE: ${input.title}\n\nOPENING OF THE ARTICLE:\n${input.opening}\n\n` +
       `STUDY SETTING:\n${settingBlock(input.setting)}\n\nCHOSEN POINTS:\n${pointsBlock}${plan}${fixed}${feedback}`,
@@ -284,6 +362,8 @@ export async function draftScript(input: DraftInput): Promise<{ script: Script; 
     postCaption: raw.postCaption?.trim() || undefined,
     hookShots: tidyShots(raw.hookShots, raw.hookBroll),
     closingShots: tidyShots(raw.closingShots, raw.closingBroll),
+    // LinkedIn ends on a fixed line over the closing card, whatever the model wrote.
+    closing: linkedin ? LINKEDIN_CLOSING : raw.closing,
     beats: raw.beats.map((b) => ({
       ...b,
       text: b.text.replace(/^\s*p\d+\s*[:.\-–)]?\s*/i, ""),

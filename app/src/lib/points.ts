@@ -1,5 +1,5 @@
 // Pure helpers for Phase 2 (no framework imports, so they can be tested with plain node).
-import type { Audience, CandidatePoint, SettingFact, StudySetting } from "./jobs";
+import { isFindingType, type Audience, type CandidatePoint, type SettingFact, type StudySetting } from "./jobs";
 
 const BACK_MATTER_HEADING = /^(references|bibliography|works cited)\s*$/gim;
 
@@ -46,6 +46,9 @@ export function matchKey(s: string): string {
 }
 
 /** Numbers as written, with thousands separators removed: "13,165" -> "13165", "6.5%" -> "6.5". */
+/** "(1)", "(2)" or "1)" numbering a list inside a point's wording. */
+const LIST_MARKER = /\(\d{1,2}\)|(?<![\w.])\d{1,2}\)(?=\s)/g;
+
 function numbersIn(s: string): string[] {
   return (s.match(/\d[\d,]*(?:\.\d+)?/g) ?? []).map((n) => n.replace(/,/g, ""));
 }
@@ -58,7 +61,9 @@ function numbersIn(s: string): string[] {
 export function applyRecommendations(points: CandidatePoint[], max: number, audience: Audience = "social"): CandidatePoint[] {
   const modelPicks = points.filter((p) => p.recommended);
   const others = points.filter((p) => !p.recommended);
-  const picks = audience === "student" ? studentMix([...modelPicks, ...others], max) : [...modelPicks, ...others].slice(0, max);
+  const ranked = [...modelPicks, ...others];
+  const picks =
+    audience === "student" ? studentMix(ranked, max) : audience === "academic" ? linkedinMix(ranked, max) : ranked.slice(0, max);
   const pickSet = new Set(picks);
   return [
     ...picks.map((p) => ({ ...p, recommended: true })),
@@ -67,7 +72,7 @@ export function applyRecommendations(points: CandidatePoint[], max: number, audi
 }
 
 const STUDENT_RANK: Partial<Record<CandidatePoint["type"], number>> = { question: 0, method: 1 };
-const isFinding = (p: CandidatePoint) => p.type !== "question" && p.type !== "method";
+const isFinding = (p: CandidatePoint) => isFindingType(p.type);
 
 /** Student picks: at most this many of each kind; findings fill the rest. */
 const STUDENT_MAX = { question: 1, method: 2 };
@@ -93,6 +98,31 @@ function studentMix(ranked: CandidatePoint[], max: number): CandidatePoint[] {
   return out
     .map((p, i) => ({ p, i: p === main ? Infinity : i }))
     .sort((a, b) => (STUDENT_RANK[a.p.type] ?? 2) - (STUDENT_RANK[b.p.type] ?? 2) || a.i - b.i)
+    .map(({ p }) => p);
+}
+
+/** LinkedIn picks: at most this many of each non-finding kind; findings fill the rest. */
+const LINKEDIN_MAX = { motivation: 1, method: 1, limitation: 1 };
+/** LinkedIn video order: motivation, method, findings, limitation. */
+const LINKEDIN_RANK: Partial<Record<CandidatePoint["type"], number>> = { motivation: 0, question: 0, method: 1, limitation: 3 };
+
+/**
+ * LinkedIn picks: 1 motivation, 1 method, 1 limitation and the rest findings, always including the
+ * main result. Kinds that run short are topped up from what is left. Ordered motivation -> method
+ * -> findings (main result first) -> limitation, the order the video tells them in.
+ */
+function linkedinMix(ranked: CandidatePoint[], max: number): CandidatePoint[] {
+  const setup = (["motivation", "method", "limitation"] as const).flatMap((t) =>
+    ranked.filter((p) => p.type === t).slice(0, LINKEDIN_MAX[t]),
+  );
+  const out: CandidatePoint[] = setup.slice(0, max);
+  const main = ranked.find((p) => p.main && isFinding(p));
+  if (main && out.length < max) out.push(main);
+  out.push(...ranked.filter((p) => isFinding(p) && p !== main).slice(0, max - out.length));
+  out.push(...ranked.filter((p) => !out.includes(p)).slice(0, max - out.length));
+  return out
+    .map((p, i) => ({ p, i: p === main ? -1 : i }))
+    .sort((a, b) => (LINKEDIN_RANK[a.p.type] ?? 2) - (LINKEDIN_RANK[b.p.type] ?? 2) || a.i - b.i)
     .map(({ p }) => p);
 }
 
@@ -173,7 +203,9 @@ export function verifyPoints(points: CandidatePoint[], sourceText: string): Veri
       continue;
     }
     const evidenceNumbers = new Set([...numbersIn(evidence), ...spelledNumbers(evidence)]);
-    const missing = numbersIn(point.text).filter((n) => !evidenceNumbers.has(n));
+    // List markers aren't figures. Testing (Olken, LinkedIn): "comparing (1) audits and (2) two
+    // grassroots interventions" dropped the only method point for "number 2 not in its evidence".
+    const missing = numbersIn(point.text.replace(LIST_MARKER, " ")).filter((n) => !evidenceNumbers.has(n));
     if (missing.length) {
       result.dropped.push({ point, reason: `number(s) ${missing.join(", ")} not in its evidence sentence` });
       continue;

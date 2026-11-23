@@ -33,6 +33,7 @@ import { defaultRenderTarget, getCloudRender, startCloudRender, uploadZip, zipPr
 import { saveTokens, saveUsage } from "@/lib/usage-db";
 import { downloadLibraryFile, listGameplay, listMusic, pickFor, trackCredit } from "@/lib/library";
 import {
+  audienceOf,
   resolveAddons,
   type AddonMedia,
   type Addons,
@@ -51,8 +52,8 @@ const SATISFYING_PIECE_S = 12;
 
 /** Add-on choices; popups/sfx/map default on when missing (jobs from before migration 0005, or never saved). */
 async function readAddons(jobId: string): Promise<Addons> {
-  const { data, error } = await supabaseAdmin().from("jobs").select("addons").eq("id", jobId).single();
-  return resolveAddons(error ? null : ((data?.addons ?? null) as Addons | null));
+  const { data, error } = await supabaseAdmin().from("jobs").select("addons, audience").eq("id", jobId).single();
+  return resolveAddons(error ? null : ((data?.addons ?? null) as Addons | null), audienceOf(data ?? {}));
 }
 
 /** With the Data visuals add-on off, beats keep their plain big-number callout. */

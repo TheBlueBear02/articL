@@ -21,7 +21,6 @@ import {
   AUDIENCE_LABEL,
   audienceOf,
   STATUS_LABEL,
-  DEFAULT_ADDONS,
   resolveAddons,
 } from "@/lib/jobs";
 import { JobMediaPanel, ReelPanel } from "@/components/job-media-panel";
@@ -697,19 +696,19 @@ export function JobView({ jobId }: { jobId: string }) {
   const [viewMode, setViewMode] = useState<JobViewMode>("production");
   const [continuing, setContinuing] = useState(false);
   // Pop-up images, sound effects, the map intro and data visuals are on by default.
-  const [addons, setAddonsState] = useState<Addons>(DEFAULT_ADDONS);
+  const [addons, setAddonsState] = useState<Addons>(() => resolveAddons(null));
   // Add-ons can be chosen and saved while the article is read; "saved" until changed again.
   const [addonsSave, setAddonsSave] = useState<"idle" | "saving" | "saved">("idle");
   const [addonsLoaded, setAddonsLoaded] = useState(false);
   function setAddons(a: Addons) {
-    setAddonsState(resolveAddons(a));
+    setAddonsState(resolveAddons(a, job ? audienceOf(job) : "social"));
     setAddonsSave("idle");
   }
   // Start from choices saved earlier (e.g. after a refresh), once, when the job first loads.
   if (job && !addonsLoaded) {
     setAddonsLoaded(true);
     if (EARLY_STATUSES.includes(job.status)) {
-      setAddonsState(resolveAddons(job.addons));
+      setAddonsState(resolveAddons(job.addons, audienceOf(job)));
       if (job.addons) setAddonsSave("saved");
     }
   }

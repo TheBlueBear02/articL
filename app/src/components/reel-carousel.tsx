@@ -6,6 +6,9 @@ import { readJson } from "@/lib/api-client";
 import { AUDIENCE_LABEL, audienceOf } from "@/lib/jobs";
 import type { ReelCard } from "@/app/api/reels/route";
 
+/** How many finished videos the home page My videos row loads. */
+const COUNT = 6;
+
 function when(iso: string) {
   return new Date(iso).toLocaleDateString("en-GB", { day: "numeric", month: "short" });
 }
@@ -22,7 +25,7 @@ export function ReelCarousel() {
   const track = useRef<HTMLUListElement>(null);
 
   useEffect(() => {
-    fetch("/api/reels")
+    fetch(`/api/reels?limit=${COUNT}`)
       .then(readJson)
       .then((body) => setReels((body as unknown as { reels: ReelCard[] }).reels))
       .catch((e) => setLoadError(e instanceof Error ? e.message : String(e)));

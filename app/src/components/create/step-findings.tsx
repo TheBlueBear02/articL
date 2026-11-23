@@ -13,11 +13,19 @@ import {
 } from "@dnd-kit/core";
 import { SortableContext, arrayMove, sortableKeyboardCoordinates, useSortable, verticalListSortingStrategy } from "@dnd-kit/sortable";
 import { CSS } from "@dnd-kit/utilities";
-import { audienceOf, isFindingType, MAX_SELECTED_POINTS, type CandidatePoint, type Job, type PointType } from "@/lib/jobs";
+import { audienceOf, isFindingType, maxPointsFor, type CandidatePoint, type Job, type PointType } from "@/lib/jobs";
 import { ActionBar, Button, Card, Chip, ErrorNote, Fold, Skeleton, StepHeading, Working, cx, useMounted } from "./ui";
 import { post } from "./use-job";
 
-const TYPE_LABEL: Record<PointType, string> = { stat: "Number", claim: "Finding", quote: "Quote", question: "Question", method: "Method" };
+const TYPE_LABEL: Record<PointType, string> = {
+  stat: "Number",
+  claim: "Finding",
+  quote: "Quote",
+  question: "Question",
+  method: "Method",
+  motivation: "Why it matters",
+  limitation: "Limitation",
+};
 
 /** Marks the line in the list: points above it are in the video, points below are not. */
 const CUT = "__cut__";
@@ -30,7 +38,7 @@ function initialOrder(job: Job): string[] {
   const all = job.candidate_points ?? [];
   const byId = new Map(all.map((p) => [p.id, p]));
   const saved = job.selected_point_ids?.filter((id) => byId.has(id));
-  const ids = (saved?.length ? saved : all.filter((p) => p.recommended).map((p) => p.id)).slice(0, MAX_SELECTED_POINTS);
+  const ids = (saved?.length ? saved : all.filter((p) => p.recommended).map((p) => p.id)).slice(0, maxPointsFor(audienceOf(job)));
   const findings = ids.filter((id) => isFindingType(byId.get(id)!.type));
   const setup = ids.filter((id) => !isFindingType(byId.get(id)!.type));
   const lead =
@@ -42,10 +50,10 @@ function initialOrder(job: Job): string[] {
   return [...kept, CUT, ...all.map((p) => p.id).filter((id) => !kept.includes(id))];
 }
 
-/** Keep at most 5 above the line: push the lowest kept point (never `keep`) just below it. */
-function capKept(order: string[], keep?: string): string[] {
+/** Keep at most `max` above the line: push the lowest kept point (never `keep`) just below it. */
+function capKept(order: string[], max: number, keep?: string): string[] {
   let next = order;
-  while (next.indexOf(CUT) > MAX_SELECTED_POINTS) {
+  while (next.indexOf(CUT) > max) {
     const above = next.slice(0, next.indexOf(CUT));
     const out = [...above].reverse().find((id) => id !== keep)!;
     const without = next.filter((id) => id !== out);
@@ -89,6 +97,8 @@ function FindingsLoading({ job }: { job: Job }) {
 
 function FindingsPicker({ job, onDone }: { job: Job; onDone: () => void }) {
   const audience = audienceOf(job);
+  const max = maxPointsFor(audience);
+  const linkedin = audience === "academic";
   const [points, setPoints] = useState<CandidatePoint[]>(job.candidate_points ?? []);
   const byId = useMemo(() => new Map(points.map((p) => [p.id, p])), [points]);
   const [order, setOrder] = useState<string[]>(() => initialOrder(job));
@@ -100,7 +110,7 @@ function FindingsPicker({ job, onDone }: { job: Job; onDone: () => void }) {
   const cut = order.indexOf(CUT);
   const kept = order.slice(0, cut);
   const leadId = kept.find((id) => isFindingType(byId.get(id)!.type));
-  const full = kept.length >= MAX_SELECTED_POINTS;
+  const full = kept.length >= max;
 
   const sensors = useSensors(
     useSensor(PointerSensor, { activationConstraint: { distance: 4 } }),
@@ -111,7 +121,7 @@ function FindingsPicker({ job, onDone }: { job: Job; onDone: () => void }) {
   function onDragEnd(e: DragEndEvent) {
     if (!e.over || e.active.id === e.over.id) return;
     const active = String(e.active.id);
-    setOrder((list) => capKept(arrayMove(list, list.indexOf(active), list.indexOf(String(e.over!.id))), active));
+    setOrder((list) => capKept(arrayMove(list, list.indexOf(active), list.indexOf(String(e.over!.id))), max, active));
   }
 
   /** Move a point to just above the line (swapping out the lowest kept one if 5 are kept). */
@@ -119,7 +129,7 @@ function FindingsPicker({ job, onDone }: { job: Job; onDone: () => void }) {
     setOrder((list) => {
       const without = list.filter((x) => x !== id);
       const c = without.indexOf(CUT);
-      return capKept([...without.slice(0, c), id, ...without.slice(c)], id);
+      return capKept([...without.slice(0, c), id, ...without.slice(c)], max, id);
     });
   /** Move a point to just below the line. */
   const remove = (id: string) =>
@@ -145,7 +155,10 @@ function FindingsPicker({ job, onDone }: { job: Job; onDone: () => void }) {
   return (
     <>
       <StepHeading eyebrow="Step 3 · Findings" title="Confirm your findings">
-        Drag points above the line to use them, up to {MAX_SELECTED_POINTS}. The top finding leads: the hook teases it and the video builds to it.
+        Drag points above the line to use them, up to {max}.{" "}
+        {linkedin
+          ? "The top finding leads: it is the main result, told first after the method."
+          : "The top finding leads: the hook teases it and the video builds to it."}
       </StepHeading>
 
       {/* Fixed height: the list scrolls inside, so the page and the button stay put. */}
@@ -171,7 +184,7 @@ function FindingsPicker({ job, onDone }: { job: Job; onDone: () => void }) {
                             point={point}
                             index={i}
                             lead={id === leadId}
-                            playsFirst={inVideo && audience === "student" && !isFindingType(point.type)}
+                            playsFirst={inVideo && (audience === "student" || (linkedin && point.type !== "limitation")) && !isFindingType(point.type)}
                             muted={!inVideo}
                             handle={handle}
                             onRemove={inVideo && kept.length > 1 ? () => remove(id) : undefined}

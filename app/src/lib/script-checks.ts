@@ -30,7 +30,8 @@ const STUDENT_JARGON =
  * (speed 1.0, ~2.5 words a second), so ~210 words is ~85 s.
  */
 export function lengthFor(audience: Audience = "social") {
-  return audience === "student"
+  // Student and LinkedIn (academic) both aim for about 90 s at a calmer voice speed.
+  return audience === "student" || audience === "academic"
     ? { maxWords: 210, targetS: 90, hardMaxS: 100, ttsSpeed: 1.0 }
     : { maxWords: DEFAULT_MAX_WORDS, targetS: 60, hardMaxS: 75, ttsSpeed: 1.1 };
 }
@@ -224,6 +225,31 @@ export function percentagePointNumbers(points: CandidatePoint[]): Set<string> {
  * Only "percent" -> "percentage points" for numbers the article gives only in percentage points.
  * Returns the fixed script and what was changed.
  */
+/**
+ * Where a beat belongs in the told order, or undefined for Social (free order).
+ * Student: question -> method -> findings. LinkedIn: motivation -> method -> main result -> other
+ * findings -> limitation.
+ */
+function beatRank(audience: Audience, points: CandidatePoint[], payoffPointId: string | undefined) {
+  const typeOf = (id: string) => points.find((p) => p.id === id)?.type;
+  if (audience === "student") {
+    return (id: string) => {
+      const t = typeOf(id);
+      return t === "question" ? 0 : t === "method" ? 1 : 2;
+    };
+  }
+  if (audience === "academic") {
+    return (id: string) => {
+      const t = typeOf(id);
+      if (t === "motivation" || t === "question") return 0;
+      if (t === "method") return 1;
+      if (t === "limitation") return 4;
+      return id === payoffPointId ? 2 : 3;
+    };
+  }
+  return undefined;
+}
+
 export function autoFixScript(
   script: Script,
   points: CandidatePoint[],
@@ -308,31 +334,37 @@ export function autoFixScript(
   // Student videos tell the study in order (question, method, findings) and end on a finding; both
   // have one right answer. Testing (Olken): the soft order check let finding -> method -> finding ->
   // finding -> method through on the last attempt, with a method point as the payoff.
-  if (audience === "student") {
-    const rank = (id: string) => {
+  // LinkedIn videos likewise: motivation, method, the main result first among the findings, limitation.
+  if (audience === "student" || audience === "academic") {
+    const isFinding = (id: string) => {
       const t = points.find((p) => p.id === id)?.type;
-      return t === "question" ? 0 : t === "method" ? 1 : 2;
+      return t === "stat" || t === "claim" || t === "quote";
     };
-    const findings = beats.filter((b) => rank(b.pointId) === 2);
+    const findings = beats.filter((b) => isFinding(b.pointId));
     // The study's main result is the payoff: the video ends on the answer to its question.
-    const main = points.find((p) => p.main && beats.some((b) => b.pointId === p.id) && rank(p.id) === 2);
-    if (main && payoffPointId !== main.id) {
+    const main = points.find((p) => p.main && beats.some((b) => b.pointId === p.id) && isFinding(p.id));
+    // (LinkedIn keeps a lead the user chose in /create, as long as it is a finding.)
+    const keepLead = audience === "academic" && !!payoffPointId && isFinding(payoffPointId);
+    if (main && payoffPointId !== main.id && !keepLead) {
       fixes.push(`Payoff set to the main result ${main.id}`);
       payoffPointId = main.id;
-    } else if (payoffPointId && rank(payoffPointId) !== 2 && findings.length) {
-      fixes.push(`Payoff ${payoffPointId} is not a finding; used ${findings[findings.length - 1].pointId}`);
-      payoffPointId = findings[findings.length - 1].pointId;
+    } else if (payoffPointId && !isFinding(payoffPointId) && findings.length) {
+      const pick = audience === "academic" ? findings[0] : findings[findings.length - 1];
+      fixes.push(`Payoff ${payoffPointId} is not a finding; used ${pick.pointId}`);
+      payoffPointId = pick.pointId;
     }
+    const rank = beatRank(audience, points, payoffPointId)!;
     const sorted = beats.map((b, i) => ({ b, i })).sort((x, y) => rank(x.b.pointId) - rank(y.b.pointId) || x.i - y.i).map(({ b }) => b);
     if (sorted.some((b, i) => b !== beats[i])) {
-      fixes.push(`Reordered beats question -> method -> findings: ${sorted.map((b) => b.pointId).join(", ")}`);
+      fixes.push(`Reordered beats into the ${audience === "academic" ? "LinkedIn" : "Student"} order: ${sorted.map((b) => b.pointId).join(", ")}`);
       beats = sorted;
     }
   }
   // The payoff beat belongs last; moving it there has one right answer, so don't spend a rewrite on it.
   const payoffAt = beats.findIndex((b) => b.pointId === payoffPointId);
   // (Not the first beat: it opens with where and when, so the model must rewrite that one.)
-  if (payoffAt > 0 && payoffAt !== beats.length - 1) {
+  // LinkedIn reveals the main result in the middle, so it stays where the order above put it.
+  if (audience !== "academic" && payoffAt > 0 && payoffAt !== beats.length - 1) {
     beats = [...beats.slice(0, payoffAt), ...beats.slice(payoffAt + 1), beats[payoffAt]];
     fixes.push(`Moved payoff beat ${payoffPointId} to the end`);
   }
@@ -510,17 +542,24 @@ export function checkScript(
   opts: { allowQuestionHook?: boolean } = {},
 ): string[] {
   const problems: string[] = [];
-  const jargonWords = audience === "student" ? STUDENT_JARGON : JARGON;
+  const linkedin = audience === "academic";
+  // LinkedIn speaks to peers and policymakers: the Student list, which allows key research terms.
+  const jargonWords = audience === "student" || linkedin ? STUDENT_JARGON : JARGON;
+  // LinkedIn opens on a question with a tease and ends on a fixed line over the closing card: no loop.
+  const loops = !linkedin;
+  const allowQuestionHook = opts.allowQuestionHook || linkedin;
 
   // Student videos tell the study in order: the question, how it was tested, then the findings.
-  if (audience === "student") {
-    const rank = (id: string) => {
-      const t = points.find((p) => p.id === id)?.type;
-      return t === "question" ? 0 : t === "method" ? 1 : 2;
-    };
+  // LinkedIn: motivation, method, the main result, the other findings, then the limitation.
+  const rank = beatRank(audience, points, script.payoffPointId);
+  if (rank) {
     const ranks = script.beats.map((b) => rank(b.pointId));
     if (ranks.some((r, i) => i > 0 && r < ranks[i - 1])) {
-      problems.push("Order: put the question beat first, then the method beats, then the findings.");
+      problems.push(
+        linkedin
+          ? "Order: motivation first, then method, then the main result and the other findings, then the limitation."
+          : "Order: put the question beat first, then the method beats, then the findings.",
+      );
     }
   }
 
@@ -533,7 +572,7 @@ export function checkScript(
   if (script.payoffPointId !== undefined) {
     if (!expectedIds.includes(script.payoffPointId)) {
       problems.push(`payoffPointId "${script.payoffPointId}" is not one of the chosen points.`);
-    } else if (gotIds.at(-1) !== script.payoffPointId) {
+    } else if (!linkedin && gotIds.at(-1) !== script.payoffPointId) {
       problems.push(`The payoff point ${script.payoffPointId} must be the last beat.`);
     }
   }
@@ -598,17 +637,18 @@ export function checkScript(
   }
 
   // Seamless loop: the closing must be an unfinished lead-in that the hook completes.
-  if (script.payoffPointId !== undefined && /[.!?]["”']?\s*$/.test(script.closing.trim())) {
+  if (loops && script.payoffPointId !== undefined && /[.!?]["”']?\s*$/.test(script.closing.trim())) {
     problems.push(`Closing ends with punctuation; it must end with an unfinished lead-in that the hook's first words complete (e.g. "...and that is exactly why").`);
   }
   // A question hook can't complete the closing's lead-in ("...exactly why would a small test...?").
-  if (script.payoffPointId !== undefined && script.hook.includes("?") && !opts.allowQuestionHook) {
+  if (script.payoffPointId !== undefined && script.hook.includes("?") && !allowQuestionHook) {
     problems.push(`Hook is a question; make it a statement that completes the closing's last words as one sentence.`);
   }
   // Open loop: the hook teases the payoff, it doesn't give its number away. Testing: "elite picks fell
   // from 39 percent to 23 percent" in the hook, with the same figures as the last beat.
+  // (LinkedIn's "finding first" hook states the main result on purpose.)
   const payoff = points.find((p) => p.id === script.payoffPointId);
-  if (payoff) {
+  if (payoff && !linkedin) {
     const spoiled = numbersIn(payoff.text).filter((n) => numbersIn(script.hook).includes(n));
     if (spoiled.length) {
       problems.push(`Spoiler: the hook gives away the payoff's number(s) ${spoiled.join(", ")}; tease the result without them.`);
@@ -619,7 +659,7 @@ export function checkScript(
   }
   // Testing: the closing ended "...and that is exactly why Can Stocks Shift Views" (the on-screen title).
   const words_ = (s: string) => s.toLowerCase().replace(/[^\w\s]/g, " ").replace(/\s+/g, " ").trim();
-  if (script.hookTitle && countWords(script.hookTitle) >= 3 && words_(script.closing).includes(words_(script.hookTitle))) {
+  if (loops && script.hookTitle && countWords(script.hookTitle) >= 3 && words_(script.closing).includes(words_(script.hookTitle))) {
     problems.push(`Closing repeats the hook title; end it with a lead-in only, the hook itself follows on replay.`);
   }
   if (script.postCaption !== undefined) {

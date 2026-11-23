@@ -1,5 +1,5 @@
 import { supabaseAdmin } from "@/lib/supabase/server";
-import { MAX_SELECTED_POINTS, type CandidatePoint } from "@/lib/jobs";
+import { audienceOf, maxPointsFor, type CandidatePoint } from "@/lib/jobs";
 import { parseAddons } from "@/lib/addons-input";
 import { POINTS_SELECTED } from "@/inngest/client";
 import { sendJobEvent } from "@/inngest/send";
@@ -15,9 +15,6 @@ export async function POST(request: Request, ctx: RouteContext<"/api/jobs/[id]/s
     return Response.json({ error: "pointIds must be a list of point ids." }, { status: 400 });
   }
   const unique = [...new Set(pointIds as string[])];
-  if (unique.length < 1 || unique.length > MAX_SELECTED_POINTS) {
-    return Response.json({ error: `Select between 1 and ${MAX_SELECTED_POINTS} points.` }, { status: 400 });
-  }
 
   // Optional add-ons (also saveable earlier, while the article is read: see ../addons).
   const parsed = await parseAddons(body?.addons);
@@ -31,6 +28,12 @@ export async function POST(request: Request, ctx: RouteContext<"/api/jobs/[id]/s
     .eq("id", id)
     .single();
   if (error || !job) return Response.json({ error: "Job not found." }, { status: 404 });
+  // Separate query so jobs keep working before migration 0008 adds the column.
+  const { data: who } = await supabase.from("jobs").select("audience").eq("id", id).single();
+  const max = maxPointsFor(audienceOf(who ?? {}));
+  if (unique.length < 1 || unique.length > max) {
+    return Response.json({ error: `Select between 1 and ${max} points.` }, { status: 400 });
+  }
   if (job.status !== "awaiting_selection") {
     return Response.json({ error: `Job is ${job.status}, not waiting for a selection.` }, { status: 409 });
   }

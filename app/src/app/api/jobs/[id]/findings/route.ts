@@ -1,12 +1,12 @@
 import { setJob } from "@/lib/supabase/jobs-db";
-import { audienceOf, isFindingType, MAX_SELECTED_POINTS, type CandidatePoint, type HookSet, type StudySetting } from "@/lib/jobs";
+import { audienceOf, isFindingType, maxPointsFor, type CandidatePoint, type HookSet, type StudySetting } from "@/lib/jobs";
 import { HOOKS_REQUESTED } from "@/inngest/client";
 import { sendJobEvent } from "@/inngest/send";
 import { hookProblems } from "@/lib/hooks";
 import { titleOf, videoOrder } from "@/lib/create-flow";
 import { advance, bad, readCreateJob } from "@/lib/create-api";
 
-// Step 3: the kept points (up to 5, in the user's order) and the lead finding. Hooks written in the
+// Step 3: the kept points (up to 5, LinkedIn 6, in the user's order) and the lead finding. Hooks written in the
 // background stay if they still fit; otherwise new ones are asked for.
 export async function POST(request: Request, ctx: RouteContext<"/api/jobs/[id]/findings">) {
   const { id } = await ctx.params;
@@ -17,7 +17,6 @@ export async function POST(request: Request, ctx: RouteContext<"/api/jobs/[id]/f
     return bad("Send pointIds (a list) and leadId.");
   }
   const unique = [...new Set(ids as string[])];
-  if (unique.length < 1 || unique.length > MAX_SELECTED_POINTS) return bad(`Keep between 1 and ${MAX_SELECTED_POINTS} points.`);
 
   const read = await readCreateJob<{
     candidate_points: CandidatePoint[] | null;
@@ -29,6 +28,8 @@ export async function POST(request: Request, ctx: RouteContext<"/api/jobs/[id]/f
   if ("error" in read) return read.error;
   const { job } = read;
   const audience = audienceOf(job);
+  const max = maxPointsFor(audience);
+  if (unique.length < 1 || unique.length > max) return bad(`Keep between 1 and ${max} points.`);
   const all = job.candidate_points ?? [];
   const unknown = unique.filter((x) => !all.some((p) => p.id === x));
   if (unknown.length) return bad(`Unknown point id(s): ${unknown.join(", ")}`);

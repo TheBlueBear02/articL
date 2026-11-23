@@ -20,6 +20,14 @@ const OPTIONS: { value: Audience; who: string; format: string; detail: string; i
     detail: "The question, how it was tested and what was found, 60 to 90 seconds.",
     icon: "M12 4L2 9l10 5 10-5-10-5zm-6 7.5V16c0 1.7 2.7 3 6 3s6-1.3 6-3v-4.5",
   },
+  {
+    value: "academic",
+    who: "Peers & policymakers",
+    format: "LinkedIn reel",
+    detail: "A calm, professional summary of the question, method and findings, about 90 seconds.",
+    // A briefcase.
+    icon: "M4 8h16v11H4zM9 8V6a1 1 0 011-1h4a1 1 0 011 1v2M4 13h16",
+  },
 ];
 
 /**

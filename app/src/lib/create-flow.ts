@@ -19,6 +19,7 @@ export const titleOf = (text: string) => text.split("\n").find((l) => l.trim().l
 export function defaultLead(points: CandidatePoint[], audience: Audience): CandidatePoint | undefined {
   const kept = points.filter((p) => p.recommended && isFindingType(p.type));
   if (audience === "student") return kept.find((p) => p.main) ?? kept.at(-1);
+  if (audience === "academic") return kept.find((p) => p.main) ?? kept[0];
   return kept.find((p) => p.type === "stat") ?? kept[0];
 }
 
@@ -29,6 +30,18 @@ export function defaultLead(points: CandidatePoint[], audience: Audience): Candi
 export function videoOrder(points: CandidatePoint[], ids: string[], leadId: string, audience: Audience): string[] {
   const byId = new Map(points.map((p) => [p.id, p]));
   const kept = ids.filter((id) => byId.has(id));
+  // LinkedIn: motivation, method, the lead finding first ("Here's what they found"), the other
+  // findings, then the limitation.
+  if (audience === "academic") {
+    const rank = (id: string) => {
+      const t = byId.get(id)!.type;
+      if (t === "motivation" || t === "question") return 0;
+      if (t === "method") return 1;
+      if (t === "limitation") return 4;
+      return id === leadId ? 2 : 3;
+    };
+    return kept.map((id, i) => ({ id, i })).sort((a, b) => rank(a.id) - rank(b.id) || a.i - b.i).map((x) => x.id);
+  }
   const rank = (id: string) => {
     if (audience !== "student") return 0;
     const t = byId.get(id)!.type;

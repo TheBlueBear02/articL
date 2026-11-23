@@ -8,6 +8,7 @@ import { MAX_PDF_BYTES, type Audience } from "@/lib/jobs";
 import { ArticleSection, type ArticlePayload, type ArticleSectionHandle } from "@/components/article-section";
 import { AudienceSidebar } from "@/components/audience-sidebar";
 import { ReelCarousel } from "@/components/reel-carousel";
+import { HomeFaq } from "@/components/home-faq";
 
 // Start a new video (upload a PDF or paste text), then continue on the job's own page.
 export default function Home() {
@@ -104,6 +105,7 @@ export default function Home() {
       </div>
 
       <ReelCarousel />
+      <HomeFaq />
     </main>
   );
 }

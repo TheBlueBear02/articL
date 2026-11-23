@@ -29,7 +29,7 @@ export function scriptProgress(job: Job): string {
 /** Step 5: music, split screen (Social only), more options, and who did the research. */
 export function StepAddons({ job, onDone }: { job: Job; onDone: () => void }) {
   const social = audienceOf(job) === "social";
-  const [addons, setAddons] = useState<Addons>(() => resolveAddons(job.addons));
+  const [addons, setAddons] = useState<Addons>(() => resolveAddons(job.addons, audienceOf(job)));
   const [author, setAuthor] = useState<AuthorInfo>(job.author_info ?? {});
   const [lib, setLib] = useState<LibraryInfo | null>(null);
   const [more, setMore] = useState(false);

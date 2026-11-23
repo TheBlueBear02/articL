@@ -19,7 +19,7 @@ type JobRow = {
 };
 
 const COLUMNS = "id, original_filename, status, created_at, updated_at, total_duration_s, file_path";
-const LIMIT = 20;
+const LIMIT = 6;
 
 /** Processing time for a finished or failed job ("made in 5m 12s"), from its stage times. */
 function madeIn(j: JobRow): string | null {

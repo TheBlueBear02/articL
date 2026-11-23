@@ -68,25 +68,28 @@ export type BrollImage = {
   pageURL: string;
 };
 
-/** stat / quote / claim are findings; question and method (Student videos) are the research
- *  question and how it was tested. */
-export type PointType = "stat" | "quote" | "claim" | "question" | "method";
+/** stat / quote / claim are findings; question and method (Student and LinkedIn videos) are the
+ *  research question and how it was tested; motivation and limitation (LinkedIn) are why the study
+ *  matters and what it can't show. */
+export type PointType = "stat" | "quote" | "claim" | "question" | "method" | "motivation" | "limitation";
 
 // ---- Who the video is for (migration 0008) ----
+// "academic" is the LinkedIn reel: it took over the planned Academic slot, so the stored value
+// (and the database check) stay "academic"; only the label says LinkedIn.
 export const AUDIENCES = ["social", "student", "academic", "kids"] as const;
 export type Audience = (typeof AUDIENCES)[number];
 /** Audiences that can be chosen today; the others show as "coming soon". */
-export const READY_AUDIENCES: Audience[] = ["social", "student"];
+export const READY_AUDIENCES: Audience[] = ["social", "student", "academic"];
 export const AUDIENCE_LABEL: Record<Audience, string> = {
   social: "Social",
   student: "Student",
-  academic: "Academic",
+  academic: "LinkedIn",
   kids: "Kids",
 };
 export const AUDIENCE_HINT: Record<Audience, string> = {
   social: "Hooky, fast reel of the main findings (up to 60 s)",
   student: "The question, how it was tested and what was found (60-90 s)",
-  academic: "Design, methods and results in depth (coming soon)",
+  academic: "A professional summary for peers and policymakers on LinkedIn (about 90 s)",
   kids: "One big idea, cartoon style (coming soon)",
 };
 /** Older jobs and databases before migration 0008 are Social. */
@@ -205,9 +208,16 @@ export type RenderTarget = (typeof RENDER_TARGETS)[number];
 /** Pop-ups, sound effects, map and charts start on; music and split stay off until chosen. */
 export const DEFAULT_ADDONS: Addons = { popups: true, sfx: true, map: true, charts: true };
 
+/** LinkedIn reels start with the same add-ons as the others (pop-ups and sound effects on, Nov 23);
+ *  kept separate so its defaults can differ later. */
+const LINKEDIN_ADDONS: Addons = { popups: true, sfx: true, map: true, charts: true };
+
+export const defaultAddonsFor = (audience: Audience = "social"): Addons =>
+  audience === "academic" ? LINKEDIN_ADDONS : DEFAULT_ADDONS;
+
 /** Fill in default on/off flags when a job has no saved add-ons (or only music/split). */
-export function resolveAddons(raw?: Addons | null): Addons {
-  return { ...DEFAULT_ADDONS, ...(raw ?? {}) };
+export function resolveAddons(raw?: Addons | null, audience: Audience = "social"): Addons {
+  return { ...defaultAddonsFor(audience), ...(raw ?? {}) };
 }
 
 /** The map intro picked for a job: the country and when it shows. */
@@ -337,6 +347,11 @@ export type Job = {
 
 export const MAX_PDF_BYTES = 20 * 1024 * 1024;
 export const MAX_SELECTED_POINTS = 5;
+/** LinkedIn keeps one more: motivation, method, up to 3 findings and a limitation. */
+export const maxPointsFor = (audience: Audience): number => (audience === "academic" ? 6 : MAX_SELECTED_POINTS);
+
+/** LinkedIn's spoken closing, over the closing card with the paper's details (spec, Nov 23). */
+export const LINKEDIN_CLOSING = "To read the full paper or get in touch, see the details below.";
 
 // ---- The /create flow (migration 0010) ----
 
@@ -344,17 +359,25 @@ export const MAX_SELECTED_POINTS = 5;
 export type PaperMeta = { title?: string; authors?: string[]; year?: string; doi?: string };
 
 /** Hook kinds, 3 per video. Social: a surprising number, a myth-buster and one about the viewer.
- *  Student: a surprising number, a question and a myth-buster. */
-export const HOOK_TYPES = ["number", "myth", "you", "question"] as const;
+ *  Student: a surprising number, a question and a myth-buster.
+ *  LinkedIn: a question with a tease, the finding first, or the problem first. */
+export const HOOK_TYPES = ["number", "myth", "you", "question", "tease", "finding", "problem"] as const;
 export type HookType = (typeof HOOK_TYPES)[number];
 export const HOOK_TYPE_LABEL: Record<HookType, string> = {
   number: "Surprising number",
   myth: "Myth-buster",
   you: "About you",
   question: "Question",
+  tease: "Question with a tease",
+  finding: "Finding first",
+  problem: "Problem first",
 };
 export const hookTypesFor = (audience: Audience): HookType[] =>
-  audience === "student" ? ["number", "question", "myth"] : ["number", "myth", "you"];
+  audience === "student"
+    ? ["number", "question", "myth"]
+    : audience === "academic"
+      ? ["tease", "finding", "problem"]
+      : ["number", "myth", "you"];
 
 export type HookOption = {
   type: HookType;
@@ -389,4 +412,4 @@ export const POST_PLATFORMS = ["instagram", "tiktok", "linkedin"] as const;
 export type PostPlatform = (typeof POST_PLATFORMS)[number];
 export type PostTexts = Partial<Record<PostPlatform, string>>;
 
-export const isFindingType = (t: PointType) => t !== "question" && t !== "method";
+export const isFindingType = (t: PointType) => t === "stat" || t === "quote" || t === "claim";

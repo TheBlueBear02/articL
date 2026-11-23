@@ -13,11 +13,10 @@ const TYPES: { who: string; format: string; soon?: boolean; icon: React.ReactNod
     icon: <path d="M12 4L2 9l10 5 10-5-10-5zm-6 7.5V16c0 1.7 2.7 3 6 3s6-1.3 6-3v-4.5" />,
   },
   {
-    who: "Academics",
-    format: "Peer summary",
-    soon: true,
-    // An open book.
-    icon: <path d="M12 6.5C10.3 5 7.8 4.5 4 4.5v13c3.8 0 6.3.5 8 2 1.7-1.5 4.2-2 8-2v-13c-3.8 0-6.3.5-8 2zm0 0v13" />,
+    who: "Peers & policymakers",
+    format: "LinkedIn reel",
+    // A briefcase.
+    icon: <path d="M4 8h16v11H4zM9 8V6a1 1 0 011-1h4a1 1 0 011 1v2M4 13h16" />,
   },
 ];
 

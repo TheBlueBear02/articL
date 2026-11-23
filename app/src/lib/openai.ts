@@ -180,15 +180,109 @@ const STUDENT_SCHEMA = (() => {
   return s;
 })();
 
+// LinkedIn videos (the "academic" audience): a calm ~90 s summary for peers and policymakers, told
+// as motivation -> method -> findings -> limitation (spec: "ArticL LinkedIn Reel Spec" in Notion).
+const LINKEDIN_PROMPT = `You help turn research articles into calm, professional 90-second videos that
+researchers share on LinkedIn with peers and policymakers.
+From the article, propose 12 to 15 candidate points. Each point is one of:
+- "motivation": why the question matters in the real world, or what was not known before this
+  study (1 or 2 such points)
+- "method": how the study was done: the data or sample, the design, what was compared or measured
+  (2 to 4 such points)
+- "stat": a concrete result, percentage or measured effect
+- "claim": a key finding or conclusion
+- "quote": a striking sentence worth reading out as-is
+- "limitation": what the study itself says it cannot show, or a caveat it states (1 or 2 such points)
+
+Rules:
+- "text": 1-2 short, plain, professional sentences. Keep any number exactly as the article states
+  it. Standard research terms ("randomized", "survey", "control group") are fine; explain anything
+  more technical in plain words.
+- "evidence": the sentence copied word for word from the article that supports the point, including
+  any parentheses inside it. If a method takes several sentences, copy each one whole (at most 3),
+  joined by " ... ". Do not paraphrase, shorten, fix typos or add commentary.
+- A "limitation" must be stated by the article itself (e.g. "We cannot rule out...", "One
+  limitation is..."), never your own criticism.
+- Skip citations, author lists, table and figure captions, and references to other papers.
+- No duplicate points.
+
+Then mark EXACTLY 6 points with "recommended": true (all others false): 1 "motivation", 1 "method",
+3 findings ("stat", "claim" or "quote") and 1 "limitation". The findings must include the study's
+main result: the direct answer to its research question, not only background numbers.
+List the 6 recommended points first, in this order: motivation, method, findings (main result
+first), limitation.
+
+Mark EXACTLY 1 point with "main": true (all others false): that main result, as a "stat" or
+"claim". Keep it simple so it can be checked: its evidence is ONE sentence, and its text uses only
+numbers from that sentence.
+
+Also fill "setting": where and when the study itself took place and who it covered (not other
+studies it cites). For each of "place" (e.g. "250 villages in Afghanistan", "England"), "period"
+(when the data was collected, e.g. "2007 to 2011", "2016") and "sample" (e.g. "2,703 voters"):
+"value" is a few plain words and "evidence" is the sentence copied word for word from the article
+that states it (if it takes several sentences, copy each one whole, joined by " ... "). If the
+article does not state it, write "" for both.`;
+
+const LINKEDIN_SCHEMA = (() => {
+  const s = structuredClone(STUDENT_SCHEMA);
+  s.properties.points.items.properties.type.enum = ["motivation", "method", "stat", "claim", "quote", "limitation"];
+  return s;
+})();
+
 export async function proposePoints(articleText: string, audience: Audience = "social"): Promise<ProposeResult> {
-  const student = audience === "student";
+  const [system, schema] =
+    audience === "student" ? [STUDENT_PROMPT, STUDENT_SCHEMA] : audience === "academic" ? [LINKEDIN_PROMPT, LINKEDIN_SCHEMA] : [SYSTEM_PROMPT, SCHEMA];
   const { data, model, usage } = await chatJson<{ points?: RawPoint[]; setting?: RawSetting }>({
-    system: student ? STUDENT_PROMPT : SYSTEM_PROMPT,
+    system,
     user: `ARTICLE:\n\n${articleText}`,
     schemaName: "candidate_points",
-    schema: student ? STUDENT_SCHEMA : SCHEMA,
+    schema,
   });
   return { points: data.points ?? [], setting: data.setting ?? {}, model, usage };
+}
+
+// Student and LinkedIn videos need the study's main result. When its quote fails the check, it is
+// asked for on its own. Testing (Olken, LinkedIn): the model wrote "about eight percentage points"
+// into a quote whose sentence says "about 30 percent of the level", in both full attempts.
+const MAIN_RESULT_PROMPT = `You find the main result of a research study: the direct answer to its research
+question (e.g. "the audits reduced missing funds by 8 percentage points"), not background numbers.
+
+Return one point:
+- "type": "stat" if it has a number, else "claim".
+- "text": 1-2 short, plain sentences stating the result. Use only numbers that appear in "evidence",
+  always as digits ("8 percentage points", even where the sentence says "eight").
+- "evidence": ONE sentence copied character for character from the article that states the result.
+  Copy it exactly as printed, including its own wording of numbers ("eight", "30 percent of the
+  level"). Never merge sentences, shorten, paraphrase or fix anything. Prefer a sentence from the
+  abstract, introduction or conclusion that states the result in words.`;
+
+const MAIN_RESULT_SCHEMA = {
+  type: "object",
+  additionalProperties: false,
+  required: ["type", "text", "evidence"],
+  properties: {
+    type: { type: "string", enum: ["stat", "claim"] },
+    text: { type: "string" },
+    evidence: { type: "string" },
+  },
+};
+
+/** Ask only for the main result, with an exactly copied sentence. `failed` is the wording whose quote failed. */
+export async function proposeMainResult(
+  articleText: string,
+  failed?: { text: string; evidence: string; reason: string },
+): Promise<{ point: RawPoint; model: string; usage: Usage }> {
+  const hint = failed
+    ? `\n\nA previous attempt was rejected (${failed.reason}):\n- text: ${failed.text}\n- evidence: "${failed.evidence}"\n` +
+      `Find the sentence the article actually prints and copy it exactly.`
+    : "";
+  const { data, model, usage } = await chatJson<{ type: "stat" | "claim"; text: string; evidence: string }>({
+    system: MAIN_RESULT_PROMPT,
+    user: `ARTICLE:\n\n${articleText}${hint}`,
+    schemaName: "main_result",
+    schema: MAIN_RESULT_SCHEMA,
+  });
+  return { point: { ...data, recommended: true, main: true }, model, usage };
 }
 
 const PICK_PHOTO_PROMPT = `You choose a stock photo for a short educational video about a research study.

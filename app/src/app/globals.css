@@ -27,6 +27,18 @@ body {
   font-family: var(--font-sans), ui-sans-serif, sans-serif;
 }
 
+/*
+ * Vertical yellow strokes like the upright of the ArticL "L".
+ * Put on a decorative layer (not on text) so the section stays white and readable.
+ */
+.brand-lines-section {
+  background-image: repeating-linear-gradient(
+    90deg,
+    transparent 0 7px,
+    color-mix(in srgb, var(--brand) 85%, transparent) 7px 10px
+  );
+}
+
 /* ---- /create flow: always light, brand yellow accents, small motion ---- */
 .a2r {
   --a2r-ink: #111111;

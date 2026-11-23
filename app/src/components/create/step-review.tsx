@@ -12,20 +12,27 @@ export type Block = { segment: number; title: string; text: string; quote?: stri
 /** The script as titled blocks, in the order it is recorded (also used by the build tracker). */
 export function scriptBlocks(job: Job): Block[] {
   if (!job.script) return [];
-  const student = audienceOf(job) === "student";
+  const audience = audienceOf(job);
+  const student = audience === "student";
+  const linkedin = audience === "academic";
   const points = new Map((job.candidate_points ?? []).map((p) => [p.id, p] as [string, CandidatePoint]));
   const parts = scriptSegments(job.script);
   const hookQuote =
     job.hooks?.items.find((h) => h.hook === job.chosen_hook?.hook)?.quote ?? points.get(job.lead_point_id ?? "")?.evidence;
   let finding = 0;
   return parts.map((part, segment) => {
-    if (part.kind === "hook") return { segment, title: "Hook", text: part.text, quote: hookQuote };
-    if (part.kind === "closing") return { segment, title: student ? "Why it matters" : "Takeaway", text: part.text };
+    if (part.kind === "hook") return { segment, title: linkedin ? "Opening" : "Hook", text: part.text, quote: hookQuote };
+    if (part.kind === "closing") {
+      return { segment, title: linkedin ? "Closing card" : student ? "Why it matters" : "Takeaway", text: part.text };
+    }
     const p = points.get(part.pointId);
     const isLead = part.pointId === job.lead_point_id;
     let title: string;
     if (student && p?.type === "question") title = "The question";
     else if (student && p?.type === "method") title = "How they tested it";
+    else if (linkedin && p?.type === "motivation") title = "Why it matters";
+    else if (linkedin && p?.type === "method") title = "How they studied it";
+    else if (linkedin && p?.type === "limitation") title = "Limitation and implication";
     else title = isLead ? "Lead finding" : `Finding ${++finding}`;
     return { segment, title, text: part.text, quote: p?.evidence };
   });

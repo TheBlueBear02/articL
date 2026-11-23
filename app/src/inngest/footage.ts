@@ -2,7 +2,7 @@ import { supabaseAdmin } from "@/lib/supabase/server";
 import { searchPhotosCached, searchVideosCached } from "@/lib/pixabay";
 import { cleanQuery, photoCandidates, placeSearchWords, type PhotoHit } from "@/lib/pixabay-api";
 import { pickPhoto } from "@/lib/openai";
-import { resolveAddons, type Addons, type PreparedPopup, type Script, type StudySetting } from "@/lib/jobs";
+import { audienceOf, resolveAddons, type Addons, type PreparedPopup, type Script, type StudySetting } from "@/lib/jobs";
 import { scriptSegments } from "@/lib/script";
 import { saveTokens, tokensOf } from "@/lib/usage-db";
 import type { TokenUsage } from "@/lib/pricing";
@@ -78,8 +78,8 @@ export async function prefetchFootage(jobId: string, script: Script, round = 1):
     ),
   );
 
-  const { data: job } = await supabaseAdmin().from("jobs").select("addons").eq("id", jobId).single();
-  const addons = resolveAddons((job?.addons ?? null) as Addons | null);
+  const { data: job } = await supabaseAdmin().from("jobs").select("addons, audience").eq("id", jobId).single();
+  const addons = resolveAddons((job?.addons ?? null) as Addons | null, audienceOf(job ?? {}));
   if (!addons.popups) return { searches: queries.size, popups: 0 };
 
   const { data: s } = await supabaseAdmin().from("jobs").select("study_setting").eq("id", jobId).single();
