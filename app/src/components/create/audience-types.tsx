@@ -24,7 +24,7 @@ const TYPES: { who: string; format: string; soon?: boolean; icon: React.ReactNod
 export function AudienceTypes() {
   return (
     <section className="mt-10" aria-label="Who it's for">
-      <h2 className="text-[17px] font-semibold tracking-[-0.01em] text-neutral-950">Made for your audience</h2>
+      <h2 className="text-[17px] font-semibold tracking-[-0.01em] text-neutral-950">Customize based on the target audience you choose</h2>
       <ul className="mt-3 grid grid-cols-3 gap-2">
         {TYPES.map((t, i) => (
           <li

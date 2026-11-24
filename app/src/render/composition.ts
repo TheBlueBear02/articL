@@ -53,9 +53,26 @@ export type TimelineSegment = {
   section?: string;
   /** Beats only: a checked chart of the beat's numbers. */
   chart?: Chart;
+  /** LinkedIn: this beat's band shows a panel (method diagram or shows/doesn't), not a number callout. */
+  panel?: PanelKind;
 };
 
 export type Timeline = { segments: TimelineSegment[]; duration: number };
+
+/** LinkedIn panels: the method diagram, and "What it shows / What it doesn't". */
+export type PanelKind = "method" | "verdict";
+/**
+ * Per-video layout that changes the timeline itself. Every buildTimeline call for one video must
+ * use the same layout, or the shot plan and the downloaded footage stop lining up.
+ */
+export type TimelineLayout = {
+  /** Seconds held after the voice ends (LinkedIn: time to read the closing card). Default 0 (loop). */
+  endHold?: number;
+  /** Segment index -> panel shown in its band. */
+  panels?: Record<number, PanelKind>;
+};
+/** LinkedIn's closing card stays this long after the last word. */
+export const CARD_HOLD_S = 3;
 
 export type Shot = {
   segment: number;
@@ -72,7 +89,7 @@ const round = (n: number) => Math.round(n * 1000) / 1000;
  * Lay segments end to end, trimming each one's trailing silence (TTS adds ~0.3-1 s).
  * Word times are shifted onto the film timeline.
  */
-export function buildTimeline(segments: Segment[]): Timeline {
+export function buildTimeline(segments: Segment[], layout: TimelineLayout = {}): Timeline {
   let t = 0;
   const out: TimelineSegment[] = segments.map((seg, index) => {
     const lastWordEnd = seg.words.length ? Math.max(...seg.words.map((w) => w.end)) : seg.duration;
@@ -87,6 +104,7 @@ export function buildTimeline(segments: Segment[]): Timeline {
       audioFile: `assets/seg-${index}.mp3`,
       ...(seg.section ? { section: seg.section } : {}),
       ...(seg.kind === "beat" && seg.chart ? { chart: seg.chart } : {}),
+      ...(layout.panels?.[index] ? { panel: layout.panels[index] } : {}),
       // Script spelling ("7.5", "2,703"), Whisper timing.
       words: alignToScript(seg.text, seg.words).map((w) => ({
         word: w.word,
@@ -95,7 +113,7 @@ export function buildTimeline(segments: Segment[]): Timeline {
       })),
     };
   });
-  return { segments: out, duration: round(t + END_HOLD_S) };
+  return { segments: out, duration: round(t + (layout.endHold ?? END_HOLD_S)) };
 }
 
 /**
@@ -243,7 +261,7 @@ function chartCallout(seg: TimelineSegment, chart: Chart): Callout | null {
 export function findCallouts(timeline: Timeline): Callout[] {
   const out: Callout[] = [];
   for (const seg of timeline.segments) {
-    if (seg.kind !== "beat") continue;
+    if (seg.kind !== "beat" || seg.panel) continue;
     const charted = seg.chart ? chartCallout(seg, seg.chart) : null;
     if (charted) {
       out.push(charted);
@@ -390,6 +408,61 @@ export function planMap(timeline: Timeline, placeWords: string[]): { start: numb
   const start = round(said ? said.start - 0.15 : Math.max(firstBeat.start + 0.2, earliest));
   const end = round(Math.min(start + MAP_S, timeline.duration - LOOP_LEAD_S - 0.3));
   return end - start >= MAP_MIN_S ? { start, end } : null;
+}
+
+/**
+ * LinkedIn: the windows that hold the band above the captions or the whole screen (panels, quoted
+ * findings, the closing card), so pop-ups and the paper page stay clear of them.
+ */
+export function linkedinBusy(timeline: Timeline, quoteSegments: number[] = []): [number, number][] {
+  const out: [number, number][] = [];
+  for (const s of timeline.segments) {
+    if (s.panel || quoteSegments.includes(s.index)) out.push([s.start, s.start + s.length]);
+    if (s.kind === "closing") out.push([s.start, timeline.duration]);
+  }
+  return out;
+}
+
+// ---- Paper page ----
+/** The paper's first page is on screen this long (shorter if something else needs the band). */
+const PAPER_S = 3;
+const PAPER_MIN_S = 1.8;
+/** Words that mean the study itself ("a new study", "the researchers", "this paper"). */
+const STUDY_WORD = /^(stud(y|ies)|papers?|research(ers?)?|articles?|experiments?|surveys?)$/;
+
+/**
+ * When the paper-page card shows: as the study is first mentioned ("study", "paper",
+ * "researchers"...) once the hook title is gone, else at the start of the first beat. It shares the
+ * band above the captions, so it waits for number callouts and the map (`busy`) to clear, and stays
+ * out of the loop seconds. Null when there's no room.
+ */
+export function planPaperPage(timeline: Timeline, busy: [number, number][] = []): { start: number; end: number } | null {
+  const firstBeat = timeline.segments.find((s) => s.kind === "beat");
+  if (!firstBeat) return null;
+  const D = timeline.duration;
+  const earliest = titleOffAt(timeline) + 0.3;
+  const quietFrom = D - LOOP_LEAD_S - 0.3;
+  const blocked: [number, number][] = [
+    ...busy.map(([a, b]): [number, number] => [a - 0.2, b + 0.2]),
+    ...findCallouts(timeline).map((c): [number, number] => [c.start - 0.2, c.end + 0.2]),
+  ];
+  const said = timeline.segments
+    .flatMap((s) => s.words)
+    .find((w) => w.start - 0.15 >= earliest && w.start - 0.15 < quietFrom && STUDY_WORD.test(plainWord(w.word)));
+  let start = said ? said.start - 0.15 : Math.max(firstBeat.start + 0.2, earliest);
+  // Move past anything already in the band, then end before the next thing that needs it.
+  for (let moved = true; moved; ) {
+    moved = false;
+    for (const [a, b] of blocked) {
+      if (start < b && start + PAPER_MIN_S > a) {
+        start = b;
+        moved = true;
+      }
+    }
+  }
+  const next = Math.min(quietFrom, ...blocked.map(([a]) => a).filter((a) => a >= start));
+  const end = Math.min(start + PAPER_S, next);
+  return end - start >= PAPER_MIN_S ? { start: round(start), end: round(end) } : null;
 }
 
 // ---- Sound effects ----
@@ -589,7 +662,40 @@ export type CompositionExtras = {
   sfx?: { files: Partial<Record<SfxKind, string>>; cues: SfxCue[] };
   /** Map intro: the scene from buildMapScene and its slot from planMap. */
   map?: MapScene & { start: number; end: number; label: string };
+  /** Paper page: the first page's image (relative to the project) and its slot from planPaperPage. */
+  paperPage?: { file: string; start: number; end: number };
+  /** LinkedIn layout: no loop; a byline, panels, quoted findings and a closing card. */
+  linkedin?: LinkedinExtras;
 };
+
+export type LinkedinExtras = {
+  /** Under the opening question: "Benjamin A. Olken · Harvard University · Journal of ... · 2007". */
+  byline?: string;
+  /** Method diagram rows ("Where" / "608 villages in East Java..."), from the verified study setting. */
+  method?: { label: string; value: string }[];
+  /** "What it shows" (the main finding) / "What it doesn't" (the limitation), from the points. */
+  verdict?: { shows: string; doesnt: string };
+  /** Findings beats (segment index) -> the paper's sentence, shown in small italics. */
+  quotes?: Record<number, string>;
+  card: {
+    title?: string;
+    authors?: string;
+    /** "Journal of Political Economy · 2007" */
+    source?: string;
+    doi?: string;
+    /** Who to contact: the author's name, role and university (email / LinkedIn come later). */
+    contact?: string;
+    /** 1-2 letters in a circle, in place of a logo. */
+    monogram: string;
+  };
+};
+
+/** Cut long text at a word boundary, with an ellipsis. */
+function clip(text: string, max: number): string {
+  const t = text.replace(/\s+/g, " ").trim();
+  if (t.length <= max) return t;
+  return t.slice(0, t.lastIndexOf(" ", max - 1)).replace(/[,;:]$/, "") + "…";
+}
 
 /**
  * A map zooming from the whole world into one country (built by render/map.ts). Coordinates are in
@@ -617,6 +723,24 @@ function inlineJson(value: unknown): string {
 }
 
 const fadesInto = (globalIndex: number) => globalIndex > 0 && globalIndex % 2 === 1;
+
+/** LinkedIn's on-screen parts, timed to their beats. */
+function linkedinData(timeline: Timeline, li: LinkedinExtras) {
+  const window = (s: TimelineSegment) => ({ start: round(s.start + 0.2), end: round(s.start + s.length - 0.1) });
+  const methodSeg = timeline.segments.find((s) => s.panel === "method");
+  const verdictSeg = timeline.segments.find((s) => s.panel === "verdict");
+  const closing = timeline.segments.find((s) => s.kind === "closing");
+  return {
+    byline: li.byline?.trim() || null,
+    method: methodSeg && li.method?.length ? { ...window(methodSeg), rows: li.method.map((r) => ({ label: r.label, value: clip(r.value, 70) })) } : null,
+    verdict: verdictSeg && li.verdict ? { ...window(verdictSeg), shows: clip(li.verdict.shows, 150), doesnt: clip(li.verdict.doesnt, 150) } : null,
+    quotes: Object.entries(li.quotes ?? {})
+      .map(([i, text]) => ({ seg: timeline.segments[Number(i)], text }))
+      .filter((q) => q.seg && !q.seg.panel)
+      .map((q) => ({ ...window(q.seg), text: clip(q.text, 210) })),
+    card: closing ? { start: round(closing.start), ...li.card } : null,
+  };
+}
 
 export function buildCompositionHtml(
   timeline: Timeline,
@@ -678,6 +802,12 @@ export function buildCompositionHtml(
     })
     .join("\n");
 
+  // Paper page: a timed image inside an untimed wrapper that carries the animation, like pop-ups.
+  const paper = extras.paperPage;
+  const paperHtml = paper
+    ? `      <div id="paper"><img id="paperimg" class="clip media" src="${paper.file}" alt="" data-start="${paper.start}" data-duration="${round(paper.end - paper.start)}" data-track-index="23" /></div>`
+    : "";
+
   // Map intro: a timed panel holding the SVG; the zoom is driven from the script below.
   const map = extras.map;
   const mapHtml = map
@@ -701,9 +831,12 @@ export function buildCompositionHtml(
     fade: FADE_S,
     title: extras.hookTitle?.trim() || null,
     titleOff,
-    titleBack: round(D - TITLE_RETURN_S),
+    // LinkedIn has no loop, so the hook title doesn't come back at the end.
+    titleBack: extras.linkedin ? null : round(D - TITLE_RETURN_S),
     credit: extras.credit?.trim() || null,
     popups: popups.map((p) => ({ start: p.start, end: p.end, tilt: p.side === "left" ? -4 : 4 })),
+    paper: paper ? { start: paper.start, end: paper.end } : null,
+    li: extras.linkedin ? linkedinData(timeline, extras.linkedin) : null,
     map: map
       ? {
           start: map.start,
@@ -827,6 +960,12 @@ export function buildCompositionHtml(
       .popup-right { right: 130px; }
       /* While a number callout holds the upper band: a smaller card under the captions, above the Reels UI. */
       .popup-low { top: 1195px; width: 320px; height: 320px; border-width: 10px; }
+      /* Paper page: the article's first page, a wide white card centred in the band above the captions. */
+      #paper {
+        position: absolute; z-index: 950; top: 330px; left: 240px; width: 600px; height: 450px; overflow: hidden;
+        border-radius: 14px; background: #fff; opacity: 0; box-shadow: 0 26px 70px rgba(0,0,0,0.6);
+        transform-origin: 50% 70%;
+      }
       /* Map intro: covers the footage (bottom half on split screen). Above the caption scrim, which
          dimmed it in testing, but under the captions, callouts and pop-ups. The background is the
          ocean colour, so the world's edges don't show as a box while zoomed out. */
@@ -860,6 +999,54 @@ export function buildCompositionHtml(
         font-weight: 800; font-size: 27px; letter-spacing: 0.02em; text-shadow: 0 2px 10px rgba(0,0,0,0.9);
       }
       #seclist .dot { width: 14px; height: 14px; border-radius: 50%; border: 3px solid currentColor; flex: none; }
+      /* ---- LinkedIn ---- */
+      /* Byline under the opening question. */
+      #titlecard.with-byline { flex-direction: column; gap: 22px; }
+      .byline {
+        max-width: 860px; text-align: center; color: var(--ink); font-weight: 700; font-size: 34px; line-height: 1.3;
+        background: rgba(0,0,0,0.6); padding: 10px 24px 12px; border-radius: 16px; text-shadow: 0 2px 10px rgba(0,0,0,0.6);
+      }
+      /* Method diagram and shows / doesn't: a card in the band above the captions. */
+      #lipanel { position: absolute; z-index: 1003; left: 110px; right: 110px; top: 300px; height: 480px; }
+      .lip {
+        position: absolute; inset: 0; display: flex; flex-direction: column; justify-content: center; gap: 18px;
+        background: rgba(10,10,14,0.88); border-radius: 28px; border-bottom: 10px solid var(--accent);
+        padding: 30px 40px; box-shadow: 0 18px 50px rgba(0,0,0,0.5); opacity: 0;
+      }
+      .lip .head { color: var(--accent); font-weight: 900; font-size: 36px; letter-spacing: 0.08em; text-transform: uppercase; }
+      .lip .row { display: flex; align-items: baseline; gap: 22px; opacity: 0; }
+      .lip .k { flex: none; width: 150px; color: rgba(255,255,255,0.6); font-weight: 800; font-size: 28px; letter-spacing: 0.06em; text-transform: uppercase; }
+      .lip .v { color: var(--ink); font-weight: 800; font-size: 40px; line-height: 1.15; }
+      .lip .half { opacity: 0; }
+      .lip .half .k { width: auto; display: block; margin-bottom: 6px; }
+      .lip .half .v { font-size: 32px; font-weight: 700; line-height: 1.25; }
+      .lip .half.no .k { color: #ff8a80; }
+      .lip .half.yes .k { color: var(--accent); }
+      /* The paper's own sentence under a finding, small and italic, below the captions. */
+      #liquote { position: absolute; z-index: 1003; left: 130px; right: 130px; top: 1195px; height: 230px; }
+      .liq {
+        position: absolute; left: 0; right: 0; top: 0; opacity: 0; background: rgba(0,0,0,0.62); border-radius: 18px;
+        padding: 16px 24px 18px; border-left: 6px solid var(--accent);
+      }
+      .liq .t { color: rgba(255,255,255,0.92); font-style: italic; font-family: Georgia, "Times New Roman", serif; font-size: 30px; line-height: 1.32; }
+      .liq .src { margin-top: 8px; color: var(--accent); font-weight: 800; font-size: 22px; letter-spacing: 0.08em; text-transform: uppercase; }
+      /* Closing card: covers everything for the last line and the hold. */
+      #endcard { position: absolute; z-index: 1100; inset: 0; }
+      .card {
+        position: absolute; inset: 0; opacity: 0; background: radial-gradient(circle at 50% 30%, #1d1d26 0%, #0b0b0f 70%);
+        display: flex; flex-direction: column; align-items: center; justify-content: center; padding: 0 120px; text-align: center;
+      }
+      .card > * { opacity: 0; }
+      .card .mono {
+        width: 150px; height: 150px; border-radius: 50%; background: var(--accent); color: #111; font-weight: 900;
+        font-size: 64px; display: flex; align-items: center; justify-content: center; margin-bottom: 44px; letter-spacing: -0.02em;
+      }
+      .card .ttl { color: var(--ink); font-weight: 900; font-size: 54px; line-height: 1.15; letter-spacing: -0.01em; }
+      .card .aut { margin-top: 28px; color: var(--ink); font-weight: 700; font-size: 36px; line-height: 1.3; }
+      .card .src { margin-top: 14px; color: rgba(255,255,255,0.75); font-style: italic; font-family: Georgia, "Times New Roman", serif; font-size: 34px; }
+      .card .doi { margin-top: 26px; color: var(--accent); font-weight: 800; font-size: 32px; letter-spacing: 0.01em; }
+      .card .who { margin-top: 40px; padding-top: 30px; border-top: 2px solid rgba(255,255,255,0.18); color: rgba(255,255,255,0.85); font-weight: 700; font-size: 30px; line-height: 1.35; }
+      .card .made { position: absolute; bottom: 360px; color: rgba(255,255,255,0.45); font-weight: 700; font-size: 24px; letter-spacing: 0.1em; text-transform: uppercase; }
       /* Source credit, just under Instagram's top UI zone. */
       #creditline { position: absolute; z-index: 1001; left: 140px; right: 140px; top: 250px; height: 60px; }
       .credit {
@@ -872,13 +1059,19 @@ export function buildCompositionHtml(
     <div id="root"${split ? ' class="split"' : ""} data-composition-id="main" data-start="0" data-duration="${D}" data-width="1080" data-height="1920">
 ${shotHtml}
 ${bottomHtml}${split ? `\n      <div id="divider"></div>` : ""}
-      <div id="scrim" class="clip" data-start="0" data-duration="${D}" data-track-index="4"></div>${mapHtml ? `\n${mapHtml}` : ""}${popupHtml ? `\n${popupHtml}` : ""}
+      <div id="scrim" class="clip" data-start="0" data-duration="${D}" data-track-index="4"></div>${mapHtml ? `\n${mapHtml}` : ""}${popupHtml ? `\n${popupHtml}` : ""}${paperHtml ? `\n${paperHtml}` : ""}
       <div id="callouts" class="clip" data-start="0" data-duration="${D}" data-track-index="5"></div>
       <div id="captions" class="clip" data-start="0" data-duration="${D}" data-track-index="6"></div>
       <div id="titlecard" class="clip" data-start="0" data-duration="${D}" data-track-index="7"></div>
       <div id="creditline" class="clip" data-start="0" data-duration="${D}" data-track-index="8"></div>
       <div id="sections" class="clip" data-start="0" data-duration="${D}" data-track-index="9"></div>
-      <div id="seclist" class="clip" data-start="0" data-duration="${D}" data-track-index="10"><div class="inner"></div></div>
+      <div id="seclist" class="clip" data-start="0" data-duration="${D}" data-track-index="10"><div class="inner"></div></div>${
+        extras.linkedin
+          ? `\n      <div id="lipanel" class="clip" data-start="0" data-duration="${D}" data-track-index="24"></div>` +
+            `\n      <div id="liquote" class="clip" data-start="0" data-duration="${D}" data-track-index="25"></div>` +
+            `\n      <div id="endcard" class="clip" data-start="0" data-duration="${D}" data-track-index="26"></div>`
+          : ""
+      }
 ${audio}
 ${musicHtml}${sfxHtml ? `\n${sfxHtml}` : ""}
     </div>
@@ -910,7 +1103,9 @@ ${musicHtml}${sfxHtml ? `\n${sfxHtml}` : ""}
         document.getElementById("titlecard").appendChild(title);
         tl.set(title, { opacity: 1 }, 0);
         tl.fromTo(title, { opacity: 1 }, { opacity: 0, duration: 0.25, ease: "power1.in", immediateRender: false }, DATA.titleOff);
-        tl.fromTo(title, { opacity: 0 }, { opacity: 1, duration: ${TITLE_RETURN_S}, ease: "power1.out", immediateRender: false }, DATA.titleBack);
+        if (DATA.titleBack !== null) {
+          tl.fromTo(title, { opacity: 0 }, { opacity: 1, duration: ${TITLE_RETURN_S}, ease: "power1.out", immediateRender: false }, DATA.titleBack);
+        }
       }
 
       // ---- Source credit: small, on screen the whole time (an end card would break the loop) ----
@@ -1109,6 +1304,95 @@ ${musicHtml}${sfxHtml ? `\n${sfxHtml}` : ""}
         tl.fromTo(w, { y: 0 }, { y: -16, duration: p.end - p.start, ease: "none" }, p.start);
         tl.fromTo(w, { opacity: 1, scale: 1 }, { opacity: 0, scale: 0.7, duration: p.end - out, ease: "power1.in", immediateRender: false }, out);
       });
+
+      // ---- LinkedIn: byline, method diagram, shows / doesn't, quoted findings, closing card ----
+      if (DATA.li) {
+        const el = (tag, cls, text) => {
+          const e = document.createElement(tag);
+          if (cls) e.className = cls;
+          if (text != null) e.textContent = text;
+          return e;
+        };
+        const li = DATA.li;
+        if (li.byline) {
+          const card = document.getElementById("titlecard");
+          card.classList.add("with-byline");
+          const by = el("div", "byline", li.byline);
+          card.appendChild(by);
+          tl.set(by, { opacity: 1 }, 0);
+          tl.fromTo(by, { opacity: 1 }, { opacity: 0, duration: 0.25, ease: "power1.in", immediateRender: false }, DATA.titleOff);
+        }
+        const panel = document.getElementById("lipanel");
+        const showPanel = (p, box, parts) => {
+          panel.appendChild(box);
+          tl.fromTo(box, { opacity: 0, y: 30 }, { opacity: 1, y: 0, duration: 0.35, ease: "power2.out" }, p.start);
+          parts.forEach((part, i) => {
+            tl.fromTo(part, { opacity: 0, x: -24 }, { opacity: 1, x: 0, duration: 0.3, ease: "power2.out" }, p.start + 0.35 + i * 0.45);
+          });
+          tl.fromTo(box, { opacity: 1 }, { opacity: 0, duration: 0.25, ease: "power1.in", immediateRender: false }, Math.max(p.start + 0.8, p.end - 0.25));
+        };
+        if (li.method) {
+          const box = el("div", "lip");
+          box.appendChild(el("div", "head", "How they studied it"));
+          const rows = li.method.rows.map((r) => {
+            const row = el("div", "row");
+            row.appendChild(el("span", "k", r.label));
+            row.appendChild(el("span", "v", r.value));
+            box.appendChild(row);
+            return row;
+          });
+          showPanel(li.method, box, rows);
+        }
+        if (li.verdict) {
+          const box = el("div", "lip");
+          const half = (cls, label, text) => {
+            const h = el("div", "half " + cls);
+            h.appendChild(el("span", "k", label));
+            h.appendChild(el("div", "v", text));
+            box.appendChild(h);
+            return h;
+          };
+          showPanel(li.verdict, box, [half("yes", "What it shows", li.verdict.shows), half("no", "What it doesn't", li.verdict.doesnt)]);
+        }
+        const quotes = document.getElementById("liquote");
+        li.quotes.forEach((q) => {
+          const box = el("div", "liq");
+          box.appendChild(el("div", "t", "\u201C" + q.text + "\u201D"));
+          box.appendChild(el("div", "src", "From the paper"));
+          quotes.appendChild(box);
+          tl.fromTo(box, { opacity: 0, y: 16 }, { opacity: 1, y: 0, duration: 0.3, ease: "power2.out" }, q.start);
+          tl.fromTo(box, { opacity: 1 }, { opacity: 0, duration: 0.2, ease: "power1.in", immediateRender: false }, Math.max(q.start + 0.5, q.end - 0.2));
+        });
+        if (li.card) {
+          const c = li.card;
+          const card = el("div", "card");
+          const parts = [
+            el("div", "mono", c.monogram),
+            c.title && el("div", "ttl", c.title),
+            c.authors && el("div", "aut", c.authors),
+            c.source && el("div", "src", c.source),
+            c.doi && el("div", "doi", "doi.org/" + c.doi),
+            c.contact && el("div", "who", c.contact),
+          ].filter(Boolean);
+          parts.forEach((p) => card.appendChild(p));
+          const made = el("div", "made", "Made with ArticL");
+          card.appendChild(made);
+          document.getElementById("endcard").appendChild(card);
+          tl.fromTo(card, { opacity: 0 }, { opacity: 1, duration: 0.4, ease: "power1.out" }, c.start);
+          [...parts, made].forEach((p, i) => {
+            tl.fromTo(p, { opacity: 0, y: 24 }, { opacity: 1, y: 0, duration: 0.35, ease: "power2.out" }, c.start + 0.25 + i * 0.12);
+          });
+        }
+      }
+
+      // ---- Paper page: rise in with a slight tilt, a slow push in, fade away ----
+      if (DATA.paper) {
+        const p = DATA.paper;
+        const out = Math.max(p.start + 0.6, p.end - 0.3);
+        tl.fromTo("#paper", { opacity: 0, y: 60, scale: 0.85, rotation: -6 }, { opacity: 1, y: 0, scale: 1, rotation: -2, duration: 0.45, ease: "back.out(1.6)" }, p.start);
+        tl.fromTo("#paperimg", { scale: 1 }, { scale: 1.06, duration: p.end - p.start, ease: "none" }, p.start);
+        tl.fromTo("#paper", { opacity: 1 }, { opacity: 0, duration: p.end - out, ease: "power1.in", immediateRender: false }, out);
+      }
 
       // ---- Map intro: zoom from the whole world into the study's country ----
       // The viewBox is recomputed from one progress value, so the map is redrawn as vectors at every

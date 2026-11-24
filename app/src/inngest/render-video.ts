@@ -1,7 +1,7 @@
 import { readFile, rm } from "node:fs/promises";
 import path from "node:path";
 import { inngest, VOICE_READY, type VoiceReadyData } from "./client";
-import { supabaseAdmin } from "@/lib/supabase/server";
+import { ARTICLES_BUCKET, supabaseAdmin } from "@/lib/supabase/server";
 import { setJob, MEDIA_BUCKET } from "@/lib/supabase/jobs-db";
 import { searchPhotosCached, searchVideosCached } from "@/lib/pixabay";
 import { downloadMedia, pickShotMedia } from "@/lib/pixabay-api";
@@ -19,6 +19,12 @@ import {
   HALF_PX,
   planMap,
   planMusic,
+  planPaperPage,
+  CARD_HOLD_S,
+  linkedinBusy,
+  type LinkedinExtras,
+  type PanelKind,
+  type TimelineLayout,
   planPopups,
   planSfx,
   planShots,
@@ -28,6 +34,7 @@ import {
   type CompositionExtras,
 } from "@/render/composition";
 import { coverTime, saveCover } from "@/render/cover";
+import { renderPaperPage } from "@/render/paper-page";
 import { extractFrame, extractThumbnail, probeDuration, projectDir, readRenderStatus, startRender, VIDEO_FILE, writeProject } from "@/render/local";
 import { defaultRenderTarget, getCloudRender, startCloudRender, uploadZip, zipProject } from "@/lib/heygen";
 import { saveTokens, saveUsage } from "@/lib/usage-db";
@@ -37,6 +44,9 @@ import {
   resolveAddons,
   type AddonMedia,
   type Addons,
+  type AuthorInfo,
+  type CandidatePoint,
+  type PaperMeta,
   type BrollImage,
   type PopupMedia,
   type PreparedPopup,
@@ -66,6 +76,95 @@ async function readAddonMedia(jobId: string): Promise<AddonMedia> {
   return error ? {} : ((data?.addon_media ?? {}) as AddonMedia);
 }
 
+/** LinkedIn's timeline layout and on-screen parts. Null for Social and Student videos (they loop). */
+type LinkedinPlan = { layout: TimelineLayout; extras: LinkedinExtras; quoteSegments: number[] };
+
+/**
+ * LinkedIn videos: no loop (the closing card holds CARD_HOLD_S), a method diagram from the verified
+ * study setting on the first method beat, "What it shows / What it doesn't" on the limitation beat,
+ * the paper's own sentence under each finding, and a closing card with the paper's details. Built
+ * from saved data only, so fetch-broll and start-render get the same layout.
+ */
+async function linkedinPlan(jobId: string, segments: Segment[]): Promise<LinkedinPlan | null> {
+  const { data } = await supabaseAdmin()
+    .from("jobs")
+    .select("audience, candidate_points, study_setting, paper_meta, author_info, script")
+    .eq("id", jobId)
+    .single();
+  if (!data || audienceOf(data) !== "academic") return null;
+  const points = new Map(((data.candidate_points ?? []) as CandidatePoint[]).map((p) => [p.id, p]));
+  const pointAt = (i: number) => (segments[i].kind === "beat" ? points.get(segments[i].pointId ?? "") : undefined);
+  const setting = (data.study_setting ?? null) as StudySetting | null;
+  const meta = (data.paper_meta ?? {}) as PaperMeta;
+  const author = (data.author_info ?? {}) as AuthorInfo;
+  const script = data.script as Script | null;
+
+  const panels: Record<number, PanelKind> = {};
+  const extras: LinkedinExtras = { card: { monogram: "" } };
+  const method = (
+    [
+      ["Where", setting?.place?.value],
+      ["When", setting?.period?.value],
+      ["Who", setting?.sample?.value],
+    ] as const
+  ).flatMap(([label, value]) => (value ? [{ label, value }] : []));
+  const methodAt = segments.findIndex((_, i) => pointAt(i)?.type === "method");
+  if (methodAt >= 0 && method.length) {
+    panels[methodAt] = "method";
+    extras.method = method;
+  }
+  const limitAt = segments.findIndex((_, i) => pointAt(i)?.type === "limitation");
+  const lead = points.get(script?.payoffPointId ?? "");
+  if (limitAt >= 0 && lead) {
+    panels[limitAt] = "verdict";
+    extras.verdict = { shows: lead.text, doesnt: pointAt(limitAt)!.text };
+  }
+  // Findings: the paper's sentence (its first quoted piece, for evidence joined with "...").
+  extras.quotes = {};
+  segments.forEach((_, i) => {
+    const p = pointAt(i);
+    if (p && ["stat", "claim", "quote"].includes(p.type) && !panels[i]) extras.quotes![i] = p.evidence.split(/\.{3}|…/)[0].trim();
+  });
+
+  const authors = meta.authors ?? [];
+  const leadName = author.name || (authors.length > 2 ? `${authors[0]} et al.` : authors.join(" & "));
+  extras.byline = [leadName, author.university, meta.journal, meta.year].filter(Boolean).join(" · ");
+  extras.card = {
+    title: meta.title,
+    authors: authors.length > 4 ? `${authors.slice(0, 4).join(", ")} et al.` : authors.join(", ") || undefined,
+    source: [meta.journal, meta.year].filter(Boolean).join(" · ") || undefined,
+    doi: meta.doi,
+    contact: author.name ? [author.name, author.role, author.university].filter(Boolean).join(" · ") : undefined,
+    monogram: initials(author.name || authors[0] || meta.title || "ArticL"),
+  };
+  return {
+    layout: { endHold: CARD_HOLD_S, panels },
+    extras,
+    quoteSegments: Object.keys(extras.quotes).map(Number),
+  };
+}
+
+/** "Benjamin A. Olken" -> "BO". */
+function initials(name: string): string {
+  const words = name.replace(/[^\p{L}\s-]/gu, " ").split(/\s+/).filter(Boolean);
+  return ((words[0]?.[0] ?? "") + (words.length > 1 ? words[words.length - 1][0] : "")).toUpperCase() || "A";
+}
+
+/** Jobs made from pasted text have no PDF (empty file_path). */
+async function hasPdf(jobId: string): Promise<boolean> {
+  const { data } = await supabaseAdmin().from("jobs").select("file_path").eq("id", jobId).single();
+  return !!data?.file_path;
+}
+
+/** The job's uploaded PDF (kept in the articles bucket since upload). */
+async function downloadPdf(jobId: string): Promise<Uint8Array> {
+  const { data: job, error } = await supabaseAdmin().from("jobs").select("file_path").eq("id", jobId).single();
+  if (error || !job?.file_path) throw new Error(`Job ${jobId} has no PDF: ${error?.message ?? "pasted text"}`);
+  const { data, error: dlError } = await supabaseAdmin().storage.from(ARTICLES_BUCKET).download(job.file_path);
+  if (dlError || !data) throw new Error(`Downloading the PDF failed: ${dlError?.message}`);
+  return new Uint8Array(await data.arrayBuffer());
+}
+
 /** Where the map's country ends up on screen (px from the top): below the captions, above the Reels UI. */
 const MAP_FOCUS_Y = 1420;
 
@@ -93,9 +192,10 @@ async function pickPopups(
   prepared: PreparedPopup[],
   /** Photo checks done here (pop-ups not prepared during the recording) add their tokens here. */
   checks: TokenUsage[],
+  layout: TimelineLayout = {},
 ): Promise<PopupMedia[]> {
   const requests = segments.flatMap((s, segment) => (s.kind === "beat" && s.popup ? [{ segment, word: s.popup.word }] : []));
-  const slots = planPopups(buildTimeline(segments), requests, busy);
+  const slots = planPopups(buildTimeline(segments, layout), requests, busy);
   const out: PopupMedia[] = [];
   for (const slot of slots) {
     const seg = segments[slot.segment];
@@ -145,6 +245,8 @@ export const renderVideo = inngest.createFunction(
     onFailure: async ({ event, error }) => {
       const { jobId } = event.data.event.data as VoiceReadyData;
       await setJob(jobId, { status: "failed", error: error.message });
+      // The temp project folder (audio, footage, the paper page image) isn't needed any more.
+      await rm(projectDir(jobId), { recursive: true, force: true }).catch(() => {});
     },
   },
   async ({ event, step }) => {
@@ -156,9 +258,12 @@ export const renderVideo = inngest.createFunction(
       if (error || !job?.segments) throw new Error(`No voiceover segments for job ${jobId}`);
       // Charts take the callout band, so pop-ups are planned around them.
       const segments = chartsIf(job.segments as Segment[], await readAddons(jobId));
+      // LinkedIn holds a closing card at the end, which changes the shot plan: same layout everywhere.
+      const li = await linkedinPlan(jobId, segments);
+      const layout = li?.layout ?? {};
 
       // ~3 s shots; each gets its segment's next shot search (older jobs: the one b-roll term).
-      const shots = planShots(buildTimeline(segments));
+      const shots = planShots(buildTimeline(segments, layout));
       const requests = shots.map((sh) => {
         const seg = segments[sh.segment];
         const queries = seg.shots?.length ? seg.shots : [seg.broll];
@@ -208,7 +313,7 @@ export const renderVideo = inngest.createFunction(
         const ordered = first ? [first, ...clips.filter((c) => c !== first)] : [];
         addonMedia.bottom = ordered.map((p) => ({ source: "library" as const, path: p }));
       } else if (addons.split === "satisfying") {
-        const film = buildTimeline(segments).duration;
+        const film = buildTimeline(segments, layout).duration;
         const n = Math.max(1, Math.ceil(film / SATISFYING_PIECE_S));
         const requests = Array.from({ length: n }, (_, i) => ({
           query: SATISFYING_QUERIES[(i + jobId.charCodeAt(0)) % SATISFYING_QUERIES.length],
@@ -251,17 +356,29 @@ export const renderVideo = inngest.createFunction(
       if (addons.map) {
         const country = findCountry(place);
         // The country and the place's own names ("Java", "Delhi"): the script may say either.
-        const slot = country ? planMap(buildTimeline(segments), [...country.words, ...placeNames(place)]) : null;
+        const slot = country ? planMap(buildTimeline(segments, layout), [...country.words, ...placeNames(place)]) : null;
         if (country && slot) {
           addonMedia.map = { country: country.name, label: country.label, period: periodLabel(setting?.period?.value), ...slot };
         }
       }
+      // Paper page: only the timing is saved here; the image is drawn from the PDF at render time.
+      // LinkedIn: panels, quoted findings and the closing card hold the band, so overlays wait.
+      const liBusy = li ? linkedinBusy(buildTimeline(segments, layout), li.quoteSegments) : [];
+      if (addons.paperPage && (await hasPdf(jobId))) {
+        const mapBusy: [number, number][] = addonMedia.map ? [[addonMedia.map.start, addonMedia.map.end]] : [];
+        const slot = planPaperPage(buildTimeline(segments, layout), [...mapBusy, ...liBusy]);
+        if (slot) addonMedia.paperPage = { page: 1, ...slot };
+      }
       if (addons.popups) {
         const usedPhotos = new Set(picks.filter((p) => p.kind === "image").map((p) => p.hit.id));
-        const busy: [number, number][] = addonMedia.map ? [[addonMedia.map.start, addonMedia.map.end]] : [];
+        const busy: [number, number][] = [
+          ...(addonMedia.map ? [[addonMedia.map.start, addonMedia.map.end] as [number, number]] : []),
+          ...(addonMedia.paperPage ? [[addonMedia.paperPage.start, addonMedia.paperPage.end] as [number, number]] : []),
+          ...liBusy,
+        ];
         const prepared = (await readAddonMedia(jobId)).preparedPopups ?? [];
         const checks: TokenUsage[] = [];
-        addonMedia.popups = await pickPopups(jobId, segments, usedPhotos, place, busy, prepared, checks);
+        addonMedia.popups = await pickPopups(jobId, segments, usedPhotos, place, busy, prepared, checks, layout);
         await saveTokens(jobId, "footage:checks", checks);
       }
       // Always written: it also replaces the pop-ups prepared while the voice was recorded.
@@ -289,8 +406,9 @@ export const renderVideo = inngest.createFunction(
       const broll = job.broll as BrollImage[];
       const script = job.script as Script | null;
 
-      // Same deterministic plan as in fetch-broll, so shot g lines up with broll[g].
-      const timeline = buildTimeline(segments);
+      // Same deterministic plan (and LinkedIn layout) as in fetch-broll, so shot g lines up with broll[g].
+      const li = await linkedinPlan(jobId, segments);
+      const timeline = buildTimeline(segments, li?.layout ?? {});
       const shots = planShots(timeline);
       if (shots.length !== broll.length) throw new Error(`Shot plan (${shots.length}) doesn't match b-roll (${broll.length}).`);
 
@@ -304,17 +422,16 @@ export const renderVideo = inngest.createFunction(
         const content = b.kind === "video" ? await downloadMedia(b.videoUrl!, "video") : await download(b.imagePath!);
         media.push({ path: file, content });
       }
-      const withMedia = withLoopEnding(
-        shots.map((sh, g) => ({
-          ...sh,
-          media: {
-            kind: broll[g].kind === "video" ? ("video" as const) : ("image" as const),
-            file: media[g].path,
-            mediaStart: broll[g].mediaStart,
-          },
-        })),
-        timeline.duration,
-      );
+      const shotsWithMedia = shots.map((sh, g) => ({
+        ...sh,
+        media: {
+          kind: broll[g].kind === "video" ? ("video" as const) : ("image" as const),
+          file: media[g].path,
+          mediaStart: broll[g].mediaStart,
+        },
+      }));
+      // LinkedIn ends on the closing card, so it doesn't loop back to the first shot.
+      const withMedia = li ? shotsWithMedia : withLoopEnding(shotsWithMedia, timeline.duration);
       // ---- Add-ons ----
       const addonMedia = await readAddonMedia(jobId);
       const extraFiles: { path: string; content: Buffer }[] = [];
@@ -372,11 +489,25 @@ export const renderVideo = inngest.createFunction(
         map = { ...scene, start: m.start, end: m.end, label: m.period ? `${m.label} · ${m.period}` : m.label };
       }
 
-      // Sound effects, timed to the final pop-ups, callouts, beats and map.
+      // Paper page: drawn from the PDF straight into the temp project folder, which is deleted after
+      // the render; never uploaded to Storage. A page that can't be drawn is left out.
+      let paperPage: CompositionExtras["paperPage"];
+      if (addonMedia.paperPage) {
+        const pp = addonMedia.paperPage;
+        try {
+          const file = `assets/paper-page-${pp.page}.jpg`;
+          extraFiles.push({ path: file, content: await renderPaperPage(await downloadPdf(jobId), pp.page) });
+          paperPage = { file, start: pp.start, end: pp.end };
+        } catch (e) {
+          console.warn(`[render-video] no paper page for ${jobId}: ${e instanceof Error ? e.message : e}`);
+        }
+      }
+
+      // Sound effects, timed to the final pop-ups (and paper page), callouts, beats and map.
       let sfx: CompositionExtras["sfx"];
       const addons = await readAddons(jobId);
       if (addons.sfx) {
-        const cues = planSfx(timeline, popups, map);
+        const cues = planSfx(timeline, paperPage ? [...popups, paperPage] : popups, map);
         const files: Partial<Record<SfxKind, string>> = {};
         for (const kind of new Set(cues.map((c) => c.kind))) {
           files[kind] = `assets/sfx-${kind}.mp3`;
@@ -392,7 +523,9 @@ export const renderVideo = inngest.createFunction(
         music,
         popups,
         map,
+        paperPage,
         sfx,
+        linkedin: li?.extras,
       });
 
       const dir = await writeProject(jobId, [
@@ -420,6 +553,7 @@ export const renderVideo = inngest.createFunction(
         bottomShots: bottom?.length ?? 0,
         popups: popups.length,
         map: !!map,
+        paperPage: !!paperPage,
         sfx: sfx?.cues.map((c) => `${c.kind}@${c.start}`) ?? [],
       };
     });

@@ -197,6 +197,8 @@ export type Addons = {
   map?: boolean;
   /** Animated charts for beats that compare numbers (on by default; others keep the big number). */
   charts?: boolean;
+  /** The article's first page as a card when the study is first mentioned (on by default; PDFs only). */
+  paperPage?: boolean;
   /** Where the video renders: "local" (this computer, free) or "cloud" (HeyGen, paid per minute).
    *  Missing = the server's default (RENDER_MODE in .env, else local). */
   render?: RenderTarget;
@@ -206,11 +208,11 @@ export const RENDER_TARGETS = ["local", "cloud"] as const;
 export type RenderTarget = (typeof RENDER_TARGETS)[number];
 
 /** Pop-ups, sound effects, map and charts start on; music and split stay off until chosen. */
-export const DEFAULT_ADDONS: Addons = { popups: true, sfx: true, map: true, charts: true };
+export const DEFAULT_ADDONS: Addons = { popups: true, sfx: true, map: true, charts: true, paperPage: true };
 
 /** LinkedIn reels start with the same add-ons as the others (pop-ups and sound effects on, Nov 23);
  *  kept separate so its defaults can differ later. */
-const LINKEDIN_ADDONS: Addons = { popups: true, sfx: true, map: true, charts: true };
+const LINKEDIN_ADDONS: Addons = { popups: true, sfx: true, map: true, charts: true, paperPage: true };
 
 export const defaultAddonsFor = (audience: Audience = "social"): Addons =>
   audience === "academic" ? LINKEDIN_ADDONS : DEFAULT_ADDONS;
@@ -272,6 +274,9 @@ export type AddonMedia = {
   bottom?: BottomClip[];
   popups?: PopupMedia[];
   map?: MapMedia;
+  /** When the paper-page card shows. Only the timing is saved: the page image is drawn from the PDF
+   *  during the render, in its temp folder, and deleted with it. */
+  paperPage?: { page: number; start: number; end: number };
   /** Pop-up photos chosen while the voice was recorded; the footage step times and uses them. */
   preparedPopups?: PreparedPopup[];
 };
@@ -356,7 +361,7 @@ export const LINKEDIN_CLOSING = "To read the full paper or get in touch, see the
 // ---- The /create flow (migration 0010) ----
 
 /** Title and authors read from the paper's first page (each found in the text), plus a DOI if printed. */
-export type PaperMeta = { title?: string; authors?: string[]; year?: string; doi?: string };
+export type PaperMeta = { title?: string; authors?: string[]; year?: string; journal?: string; doi?: string };
 
 /** Hook kinds, 3 per video. Social: a surprising number, a myth-buster and one about the viewer.
  *  Student: a surprising number, a question and a myth-buster.

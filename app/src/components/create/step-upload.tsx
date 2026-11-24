@@ -5,6 +5,7 @@ import type { Job } from "@/lib/jobs";
 import { ActionBar, Button, Card, ErrorNote, Skeleton, StepHeading, Working, cx } from "./ui";
 import { RecentReels } from "./recent-reels";
 import { AudienceTypes } from "./audience-types";
+import { PaperToReel } from "./paper-to-reel";
 
 /** Step 1: pick a PDF. The upload runs in the background (see CreateStart); this only hands it over. */
 export function UploadDrop({ onPick, error }: { onPick: (file: File) => void; error?: string | null }) {
@@ -43,7 +44,7 @@ export function UploadDrop({ onPick, error }: { onPick: (file: File) => void; er
             </svg>
           </span>
           <span className="text-center">
-            <span className="block text-[17px] font-semibold text-neutral-950">Choose a PDF</span>
+            <span className="block text-[17px] font-semibold text-neutral-950">Upload a PDF</span>
             <span className="mt-1 block text-[13px] text-neutral-500">or drop it here</span>
           </span>
           <input
@@ -62,7 +63,7 @@ export function UploadDrop({ onPick, error }: { onPick: (file: File) => void; er
       <ErrorNote>{error}</ErrorNote>
 
       <ul className="mt-8 space-y-3 text-[13px] text-neutral-500">
-        {["Findings checked against your paper's own sentences", "Full video, script, voice and graphics in less than 4 minutes", "Ready to post on Instagram, TikTok and LinkedIn"].map(
+        {["Findings checked against your paper's own sentences", "Full video, script, voice and graphics in less than 4 minutes", "No AI model uses your research for training"].map(
           (t, i) => (
             <li key={t} className="a2r-rise flex items-center gap-3" style={{ "--i": i + 2 } as React.CSSProperties}>
               <span className="h-1.5 w-1.5 rounded-full bg-brand" />
@@ -72,12 +73,14 @@ export function UploadDrop({ onPick, error }: { onPick: (file: File) => void; er
         )}
       </ul>
 
+      <PaperToReel />
+
       <AudienceTypes />
 
       <RecentReels />
 
       <ActionBar>
-        <Button onClick={() => inputRef.current?.click()}>Choose PDF</Button>
+        <Button onClick={() => inputRef.current?.click()}>Upload PDF</Button>
       </ActionBar>
     </>
   );

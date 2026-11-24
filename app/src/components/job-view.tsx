@@ -396,6 +396,7 @@ function AddonsPicker({
           ["sfx", "Sound effects"],
           ["map", "Map intro"],
           ["charts", "Data visuals"],
+          ["paperPage", "Paper page (PDF uploads only)"],
         ] as const
       ).map(([key, label]) => (
         <div key={key}>

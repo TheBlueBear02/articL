@@ -10,16 +10,19 @@ const SYSTEM = `You read the first page of a research paper and return its title
 - title: the paper's own title, copied exactly as printed (not the journal or a running header).
 - authors: each author's full name as printed, in order (no affiliations, degrees or footnote marks).
 - year: the publication year if printed on this page, else "".
+- journal: the journal's name as printed on this page (e.g. in a header, footer or citation line such
+  as "Journal of Political Economy, 2007, vol. 115"), without volume or page numbers, else "".
 If you can't tell, use "" or [].`;
 
 const SCHEMA = {
   type: "object",
   additionalProperties: false,
-  required: ["title", "authors", "year"],
+  required: ["title", "authors", "year", "journal"],
   properties: {
     title: { type: "string" },
     authors: { type: "array", items: { type: "string" } },
     year: { type: "string" },
+    journal: { type: "string" },
   },
 };
 
@@ -35,7 +38,7 @@ export function findDoi(text: string): string | undefined {
  */
 export async function readPaperMeta(text: string): Promise<{ meta: PaperMeta; usage: Usage; model: string }> {
   const front = text.slice(0, FRONT_CHARS);
-  const { data, usage, model } = await chatJson<{ title: string; authors: string[]; year: string }>({
+  const { data, usage, model } = await chatJson<{ title: string; authors: string[]; year: string; journal: string }>({
     system: SYSTEM,
     user: front,
     schemaName: "paper_meta",
@@ -46,6 +49,7 @@ export async function readPaperMeta(text: string): Promise<{ meta: PaperMeta; us
     title: inFront(data.title) ? data.title.trim().replace(/\s+/g, " ") : undefined,
     authors: data.authors.map((a) => a.trim()).filter(inFront).slice(0, 8),
     year: /^(19|20)\d{2}$/.test(data.year) && front.includes(data.year) ? data.year : undefined,
+    journal: inFront(data.journal) ? data.journal.trim().replace(/\s+/g, " ") : undefined,
     doi: findDoi(text),
   };
   return { meta, usage, model };

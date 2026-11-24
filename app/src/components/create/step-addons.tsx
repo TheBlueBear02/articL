@@ -115,7 +115,7 @@ export function StepAddons({ job, onDone }: { job: Job; onDone: () => void }) {
           <button type="button" onClick={() => setMore((m) => !m)} className="flex w-full items-center justify-between text-left" aria-expanded={more}>
             <span>
               <span className="block text-[15px] font-semibold text-neutral-950">More options</span>
-              <span className="mt-0.5 block text-[13px] text-neutral-500">Pop-ups, sounds, map and charts are on</span>
+              <span className="mt-0.5 block text-[13px] text-neutral-500">Pop-ups, sounds, map, charts and paper page are on</span>
             </span>
             <svg className={`transition-transform duration-300 ${more ? "rotate-180" : ""}`} width="18" height="18" viewBox="0 0 24 24" fill="none" aria-hidden>
               <path d="M6 9l6 6 6-6" stroke="#737373" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" />
@@ -134,6 +134,9 @@ export function StepAddons({ job, onDone }: { job: Job; onDone: () => void }) {
               </Row>
               <Row title="Data visuals" hint="Animated charts for compared numbers">
                 <Toggle label="Data visuals" on={addons.charts !== false} onChange={(charts) => set({ charts })} />
+              </Row>
+              <Row title="Paper page" hint="Your paper's first page when the study is mentioned">
+                <Toggle label="Paper page" on={addons.paperPage !== false} onChange={(paperPage) => set({ paperPage })} />
               </Row>
               {lib?.render && (
                 <div>

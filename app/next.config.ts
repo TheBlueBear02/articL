@@ -17,6 +17,8 @@ const nextConfig: NextConfig = {
   // Phone / LAN access: without this, Next blocks /_next in development and the page never hydrates.
   allowedDevOrigins: lanDevHosts(),
   cacheComponents: true,
+  // Native module (draws the "Paper page" add-on's PDF page): load it from node_modules, don't bundle it.
+  serverExternalPackages: ["@napi-rs/canvas"],
   partialPrefetching: true,
   // Next 16.4 Turbopack can reload the tab forever after a restart/LAN reconnect; this stops that loop.
   experimental: {
