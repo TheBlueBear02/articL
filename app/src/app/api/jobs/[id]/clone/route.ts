@@ -3,7 +3,7 @@ import { HOOKS_REQUESTED } from "@/inngest/client";
 import { sendJobEvent } from "@/inngest/send";
 import { bad, logEvent, readCreateJob } from "@/lib/create-api";
 
-// Step 8, "Make another version": a new video from the same paper, starting at the findings step.
+// Step 7, "Make another version": a new video from the same paper, starting at the findings step.
 // The text, points and setting are copied, so nothing is read or proposed again.
 export async function POST(_request: Request, ctx: RouteContext<"/api/jobs/[id]/clone">) {
   const { id } = await ctx.params;

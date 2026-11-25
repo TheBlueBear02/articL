@@ -4,7 +4,7 @@ import { bad, readCreateJob } from "@/lib/create-api";
 
 const MAX_CHARS = 5000;
 
-// Step 7/8: the user's edited post text for one platform.
+// Step 6/7: the user's edited post text for one platform.
 export async function POST(request: Request, ctx: RouteContext<"/api/jobs/[id]/post-text">) {
   const { id } = await ctx.params;
   const body = await request.json().catch(() => null);

@@ -410,6 +410,17 @@ export function planMap(timeline: Timeline, placeWords: string[]): { start: numb
   return end - start >= MAP_MIN_S ? { start, end } : null;
 }
 
+/** How long a finding's paper-quote popup stays on screen (seconds). */
+const QUOTE_POPUP_S = 3.2;
+/** Max characters for a quote popup: one short sentence at a large type size. */
+const QUOTE_POPUP_CHARS = 110;
+
+/** Quote popup window at the start of a finding beat (short; not the whole segment). */
+function quotePopupWindow(s: TimelineSegment): { start: number; end: number } {
+  const start = round(s.start + 0.2);
+  return { start, end: round(Math.min(s.start + s.length - 0.1, start + QUOTE_POPUP_S)) };
+}
+
 /**
  * LinkedIn: the windows that hold the band above the captions or the whole screen (panels, quoted
  * findings, the closing card), so pop-ups and the paper page stay clear of them.
@@ -417,7 +428,11 @@ export function planMap(timeline: Timeline, placeWords: string[]): { start: numb
 export function linkedinBusy(timeline: Timeline, quoteSegments: number[] = []): [number, number][] {
   const out: [number, number][] = [];
   for (const s of timeline.segments) {
-    if (s.panel || quoteSegments.includes(s.index)) out.push([s.start, s.start + s.length]);
+    if (s.panel) out.push([s.start, s.start + s.length]);
+    if (quoteSegments.includes(s.index)) {
+      const w = quotePopupWindow(s);
+      out.push([w.start, w.end]);
+    }
     if (s.kind === "closing") out.push([s.start, timeline.duration]);
   }
   return out;
@@ -675,7 +690,7 @@ export type LinkedinExtras = {
   method?: { label: string; value: string }[];
   /** "What it shows" (the main finding) / "What it doesn't" (the limitation), from the points. */
   verdict?: { shows: string; doesnt: string };
-  /** Findings beats (segment index) -> the paper's sentence, shown in small italics. */
+  /** Findings beats (segment index) -> the paper's sentence; shown as a short one-sentence popup. */
   quotes?: Record<number, string>;
   card: {
     title?: string;
@@ -695,6 +710,13 @@ function clip(text: string, max: number): string {
   const t = text.replace(/\s+/g, " ").trim();
   if (t.length <= max) return t;
   return t.slice(0, t.lastIndexOf(" ", max - 1)).replace(/[,;:]$/, "") + "…";
+}
+
+/** First sentence only (for quote popups that must stay readable on screen). */
+function firstSentence(text: string): string {
+  const t = text.replace(/\s+/g, " ").trim();
+  const m = t.match(/^(.+?[.!?])(?:\s|$)/);
+  return (m?.[1] ?? t).trim();
 }
 
 /**
@@ -737,7 +759,7 @@ function linkedinData(timeline: Timeline, li: LinkedinExtras) {
     quotes: Object.entries(li.quotes ?? {})
       .map(([i, text]) => ({ seg: timeline.segments[Number(i)], text }))
       .filter((q) => q.seg && !q.seg.panel)
-      .map((q) => ({ ...window(q.seg), text: clip(q.text, 210) })),
+      .map((q) => ({ ...quotePopupWindow(q.seg), text: clip(firstSentence(q.text), QUOTE_POPUP_CHARS) })),
     card: closing ? { start: round(closing.start), ...li.card } : null,
   };
 }
@@ -1022,14 +1044,14 @@ export function buildCompositionHtml(
       .lip .half .v { font-size: 32px; font-weight: 700; line-height: 1.25; }
       .lip .half.no .k { color: #ff8a80; }
       .lip .half.yes .k { color: var(--accent); }
-      /* The paper's own sentence under a finding, small and italic, below the captions. */
-      #liquote { position: absolute; z-index: 1003; left: 130px; right: 130px; top: 1195px; height: 230px; }
+      /* One short paper sentence under a finding — large type, brief on screen. */
+      #liquote { position: absolute; z-index: 1003; left: 100px; right: 100px; top: 1180px; height: 260px; }
       .liq {
         position: absolute; left: 0; right: 0; top: 0; opacity: 0; background: rgba(0,0,0,0.62); border-radius: 18px;
-        padding: 16px 24px 18px; border-left: 6px solid var(--accent);
+        padding: 22px 28px 24px; border-left: 6px solid var(--accent);
       }
-      .liq .t { color: rgba(255,255,255,0.92); font-style: italic; font-family: Georgia, "Times New Roman", serif; font-size: 30px; line-height: 1.32; }
-      .liq .src { margin-top: 8px; color: var(--accent); font-weight: 800; font-size: 22px; letter-spacing: 0.08em; text-transform: uppercase; }
+      .liq .t { color: rgba(255,255,255,0.95); font-style: italic; font-family: Georgia, "Times New Roman", serif; font-size: 44px; line-height: 1.28; }
+      .liq .src { margin-top: 12px; color: var(--accent); font-weight: 800; font-size: 24px; letter-spacing: 0.08em; text-transform: uppercase; }
       /* Closing card: covers everything for the last line and the hold. */
       #endcard { position: absolute; z-index: 1100; inset: 0; }
       .card {

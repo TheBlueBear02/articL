@@ -5,7 +5,7 @@ import type { Audience, Job } from "@/lib/jobs";
 import { ActionBar, Button, Card, ErrorNote, StepHeading, cx } from "./ui";
 import { post } from "./use-job";
 
-const OPTIONS: { value: Audience; who: string; format: string; detail: string; icon: string }[] = [
+export const AUDIENCE_OPTIONS: { value: Audience; who: string; format: string; detail: string; icon: string }[] = [
   {
     value: "social",
     who: "General public",
@@ -25,14 +25,13 @@ const OPTIONS: { value: Audience; who: string; format: string; detail: string; i
     who: "Peers & policymakers",
     format: "LinkedIn reel",
     detail: "A calm, professional summary of the question, method and findings, about 90 seconds.",
-    // A briefcase.
     icon: "M4 8h16v11H4zM9 8V6a1 1 0 011-1h4a1 1 0 011 1v2M4 13h16",
   },
 ];
 
 /**
- * Step 2 screen: who the video is for, which also sets its format. Used right after a PDF is
- * picked (before the job exists, on /create) and on a job's page after a refresh.
+ * Recovery screen when a job exists but audience was never confirmed (e.g. an older /create job).
+ * Happy path picks audience with the PDF on step 1.
  */
 export function AudiencePicker({
   initial,
@@ -42,7 +41,6 @@ export function AudiencePicker({
   onConfirm,
 }: {
   initial?: Audience | null;
-  /** Already saved: shown, not changeable. */
   locked?: boolean;
   busy?: boolean;
   error?: string | null;
@@ -51,11 +49,11 @@ export function AudiencePicker({
   const [choice, setChoice] = useState<Audience | null>(initial ?? null);
   return (
     <>
-      <StepHeading eyebrow="Step 2 · Audience" title="Who is this video for?">
+      <StepHeading step={2} eyebrow="Step 2 · Choose your target audience" title="Who is this video for?">
         This sets the format of your video.
       </StepHeading>
       <div className="space-y-3" role="radiogroup">
-        {OPTIONS.map((o, i) => {
+        {AUDIENCE_OPTIONS.map((o, i) => {
           const on = choice === o.value;
           return (
             <Card
@@ -97,7 +95,7 @@ export function AudiencePicker({
   );
 }
 
-/** Step 2 on a job's page (e.g. after a refresh before the audience was saved). */
+/** Recovery step on a job's page when audience was never saved. */
 export function StepAudience({ job, onDone }: { job: Job; onDone: () => void }) {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);

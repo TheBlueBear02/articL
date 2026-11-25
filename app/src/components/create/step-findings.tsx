@@ -63,7 +63,7 @@ function capKept(order: string[], max: number, keep?: string): string[] {
   return next;
 }
 
-/** Step 3: keep up to 5 points, drag to order them; the top finding leads. */
+/** Step 2: keep up to 5 points, drag to order them; the top finding leads. */
 export function StepFindings({ job, onDone }: { job: Job; onDone: () => void }) {
   const ready = job.status === "awaiting_findings" || job.status === "awaiting_hook";
   if (!ready) return <FindingsLoading job={job} />;
@@ -73,7 +73,7 @@ export function StepFindings({ job, onDone }: { job: Job; onDone: () => void }) 
 function FindingsLoading({ job }: { job: Job }) {
   return (
     <>
-      <StepHeading eyebrow="Step 3 · Findings" title="Finding the key results">
+      <StepHeading step={3} eyebrow="Step 3 · Extracting findings" title="Finding the key results">
         Each finding comes with the sentence from your paper that backs it up.
       </StepHeading>
       <div className="space-y-3">
@@ -154,7 +154,7 @@ function FindingsPicker({ job, onDone }: { job: Job; onDone: () => void }) {
 
   return (
     <>
-      <StepHeading eyebrow="Step 3 · Findings" title="Confirm your findings">
+      <StepHeading step={3} eyebrow="Step 3 · Extracting findings" title="Confirm your findings">
         Drag points above the line to use them, up to {max}.{" "}
         {linkedin
           ? "The top finding leads: it is the main result, told first after the method."

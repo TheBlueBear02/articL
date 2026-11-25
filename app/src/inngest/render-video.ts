@@ -119,7 +119,7 @@ async function linkedinPlan(jobId: string, segments: Segment[]): Promise<Linkedi
     panels[limitAt] = "verdict";
     extras.verdict = { shows: lead.text, doesnt: pointAt(limitAt)!.text };
   }
-  // Findings: the paper's sentence (its first quoted piece, for evidence joined with "...").
+  // Findings: paper evidence for a short one-sentence on-screen popup (trimmed further in composition).
   extras.quotes = {};
   segments.forEach((_, i) => {
     const p = pointAt(i);

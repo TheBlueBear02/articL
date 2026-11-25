@@ -4,12 +4,12 @@ import { useState } from "react";
 import type { Job } from "@/lib/jobs";
 import { Shell } from "@/components/create/create-flow";
 import { PaperCard } from "@/components/create/step-upload";
-import { StepAudience } from "@/components/create/step-audience";
 import { StepFindings } from "@/components/create/step-findings";
 import { StepHook } from "@/components/create/step-hook";
 import { StepAddons } from "@/components/create/step-addons";
 import { StepReview } from "@/components/create/step-review";
 import { StepBuild } from "@/components/create/step-build";
+import { StepResult } from "@/components/create/step-result";
 
 // Dev-only design preview of each step with made-up sample data (no database, buttons do nothing useful).
 const SAMPLE: Job = {
@@ -73,28 +73,28 @@ const SAMPLE: Job = {
 };
 
 const STEPS: Record<number, Partial<Job>> = {
-  1: { status: "extracting", audience_confirmed: false, paper_meta: null },
-  2: { status: "extracted", audience_confirmed: false },
-  3: { status: "awaiting_findings", selected_point_ids: null, lead_point_id: null },
-  4: { status: "awaiting_hook" },
-  5: { status: "scripting" },
-  6: { status: "awaiting_review" },
-  7: { status: "rendering" },
+  1: { status: "extracting", paper_meta: null },
+  2: { status: "awaiting_findings", selected_point_ids: null, lead_point_id: null },
+  3: { status: "awaiting_hook" },
+  4: { status: "scripting" },
+  5: { status: "awaiting_review" },
+  6: { status: "rendering" },
+  7: { status: "rendered", video_path: "sample.mp4" },
 };
 
 export function PreviewSteps({ step }: { step: number }) {
   const [job] = useState<Job>({ ...SAMPLE, ...(STEPS[step] ?? {}) });
   const noop = () => {};
   return (
-    <Shell step={step}>
+    <Shell step={step} job={job}>
       <div key={step} className="a2r-step-next">
         {step === 1 && <PaperCard filename={job.original_filename} job={job} />}
-        {step === 2 && <StepAudience job={job} onDone={noop} />}
-        {step === 3 && <StepFindings job={job} onDone={noop} />}
-        {step === 4 && <StepHook job={job} onDone={noop} />}
-        {step === 5 && <StepAddons job={job} onDone={noop} />}
-        {step === 6 && <StepReview job={job} onDone={noop} />}
-        {step === 7 && <StepBuild job={job} onDone={noop} />}
+        {step === 2 && <StepFindings job={job} onDone={noop} />}
+        {step === 3 && <StepHook job={job} onDone={noop} />}
+        {step === 4 && <StepAddons job={job} onDone={noop} />}
+        {step === 5 && <StepReview job={job} onDone={noop} />}
+        {step === 6 && <StepBuild job={job} onDone={noop} />}
+        {step === 7 && <StepResult job={job} />}
       </div>
     </Shell>
   );

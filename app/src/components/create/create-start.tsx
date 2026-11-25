@@ -10,7 +10,7 @@ import { UploadDrop } from "./step-upload";
 import { AudiencePicker } from "./step-audience";
 import { post } from "./use-job";
 
-/** Create the job, upload the PDF and start reading it. Resolves to the job id. */
+/** Create the job, upload the PDF and start reading it. Audience is confirmed on step 2. */
 async function uploadPaper(file: File): Promise<string> {
   const created = (await readJson(
     await fetch("/api/jobs", {
@@ -28,13 +28,13 @@ async function uploadPaper(file: File): Promise<string> {
 }
 
 /**
- * Steps 1-2 on /create. Picking a PDF moves straight to the audience question; the upload and
- * reading run in the background. Continue waits for the upload only if it isn't done yet, saves
- * the audience and opens the job's own page at the findings step.
+ * Steps 1–2 on /create. Picking a PDF moves to the audience step; the upload runs in the
+ * background. Continue waits for the upload if needed, saves the audience, and opens the job page.
  */
 export function CreateStart() {
   const router = useRouter();
   const upload = useRef<Promise<string> | null>(null);
+  const headerInput = useRef<HTMLInputElement>(null);
   const [step, setStep] = useState<1 | 2>(1);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -57,7 +57,6 @@ export function CreateStart() {
     try {
       jobId = await upload.current;
     } catch (e) {
-      // The upload itself failed: back to step 1 to pick the file again.
       upload.current = null;
       setBusy(false);
       setStep(1);
@@ -73,8 +72,37 @@ export function CreateStart() {
     }
   }
 
+  const uploadAction =
+    step === 1 ? (
+      <>
+        <input
+          ref={headerInput}
+          type="file"
+          accept="application/pdf,.pdf"
+          className="sr-only"
+          onChange={(e) => {
+            const f = e.target.files?.[0];
+            if (f) pick(f);
+            e.target.value = "";
+          }}
+        />
+        <button
+          type="button"
+          onClick={() => headerInput.current?.click()}
+          className="inline-flex h-9 items-center justify-center rounded-xl bg-brand px-3.5 text-[13px] font-semibold text-neutral-950 shadow-[0_1px_0_rgba(0,0,0,0.04)] transition hover:bg-[var(--a2r-brand-strong)] active:scale-[0.98]"
+        >
+          Upload PDF
+        </button>
+      </>
+    ) : undefined;
+
   return (
-    <Shell step={step} onBack={step === 2 && !busy ? () => setStep(1) : undefined}>
+    <Shell
+      step={1}
+      audienceRecovery={step === 2}
+      onBack={step === 2 && !busy ? () => setStep(1) : undefined}
+      headerAction={uploadAction}
+    >
       <div key={step} className={step === 2 ? "a2r-step-next" : "a2r-step-back"}>
         {step === 1 ? <UploadDrop onPick={pick} error={error} /> : <AudiencePicker busy={busy} error={error} onConfirm={confirm} />}
       </div>

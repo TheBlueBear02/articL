@@ -26,7 +26,7 @@ export function scriptProgress(job: Job): string {
   return "Your script is ready";
 }
 
-/** Step 5: music, split screen (Social only), more options, and who did the research. */
+/** Step 4: music, split screen (Social only), more options, and who did the research. */
 export function StepAddons({ job, onDone }: { job: Job; onDone: () => void }) {
   const social = audienceOf(job) === "social";
   const [addons, setAddons] = useState<Addons>(() => resolveAddons(job.addons, audienceOf(job)));
@@ -65,7 +65,7 @@ export function StepAddons({ job, onDone }: { job: Job; onDone: () => void }) {
 
   return (
     <>
-      <StepHeading eyebrow="Step 5 · Add-ons" title="Make it yours" />
+      <StepHeading step={5} eyebrow="Step 5 · Choose Add-ons" title="Make it yours" />
 
       <div className="space-y-3">
         <Card index={0} className="p-5">

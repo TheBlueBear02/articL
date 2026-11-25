@@ -5,7 +5,7 @@ import { HOOK_TYPE_LABEL, type Job } from "@/lib/jobs";
 import { ActionBar, Button, Card, Chip, ErrorNote, Fold, Skeleton, Spinner, StepHeading, TextField, Working } from "./ui";
 import { post } from "./use-job";
 
-/** Step 4: pick one of the hook options (none is chosen for the user), ask for more, or write your own. */
+/** Step 3: pick one of the hook options (none is chosen for the user), ask for more, or write your own. */
 export function StepHook({ job, onDone }: { job: Job; onDone: () => void }) {
   const hooks = job.hooks;
   const items = hooks?.items ?? [];
@@ -49,7 +49,7 @@ export function StepHook({ job, onDone }: { job: Job; onDone: () => void }) {
 
   return (
     <>
-      <StepHeading eyebrow="Step 4 · Hook" title="Choose how it opens">
+      <StepHeading step={4} eyebrow="Step 4 · Choose opening hook" title="Choose how it opens">
         The first 2 seconds decide if people keep watching. Each hook teases your lead finding.
       </StepHeading>
 

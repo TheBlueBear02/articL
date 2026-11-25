@@ -4,7 +4,7 @@ import type { Segment } from "@/lib/jobs";
 import { coverTime, saveCover } from "@/render/cover";
 import { bad, readCreateJob } from "@/lib/create-api";
 
-// Step 7/8: which script part's frame becomes the cover. Before the render finishes it is only
+// Step 6/7: which script part's frame becomes the cover. Before the render finishes it is only
 // saved (the render uses it); afterwards the frame is taken from the finished video now.
 export async function POST(request: Request, ctx: RouteContext<"/api/jobs/[id]/cover">) {
   const { id } = await ctx.params;

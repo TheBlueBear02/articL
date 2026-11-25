@@ -32,8 +32,8 @@ export function RecentReels() {
         <h2 className="text-[17px] font-semibold tracking-[-0.01em] text-neutral-950">Recent videos</h2>
         {reels && <span className="text-[12px] text-neutral-400">Swipe to see more</span>}
       </div>
-      {/* Bleeds to the screen edges, so the next card peeks in and invites a swipe. */}
-      <ul className="a2r-noscrollbar -mx-4 mt-3 flex snap-x snap-mandatory gap-3 overflow-x-auto scroll-px-4 px-4 pb-2">
+      {/* Mobile: bleeds to the screen edges so the next card peeks. Desktop: stay in-column. */}
+      <ul className="a2r-noscrollbar -mx-4 mt-3 flex snap-x snap-mandatory gap-3 overflow-x-auto scroll-px-4 px-4 pb-2 lg:mx-0 lg:scroll-px-0 lg:px-0">
         {!reels &&
           [0, 1, 2].map((i) => (
             <li key={i} className="w-[38%] shrink-0">

@@ -27,7 +27,7 @@ export function useMediaLinks(job: Job) {
   return links;
 }
 
-/** Step 7: a live build tracker, with the post text, cover and a feedback question to fill the wait. */
+/** Step 6: a live build tracker, with the post text, cover and a feedback question to fill the wait. */
 export function StepBuild({ job, onDone }: { job: Job; onDone: () => void }) {
   const blocks = scriptBlocks(job);
   const links = useMediaLinks(job);
@@ -52,7 +52,7 @@ export function StepBuild({ job, onDone }: { job: Job; onDone: () => void }) {
 
   return (
     <>
-      <StepHeading eyebrow="Step 7 · Building" title={rendered ? "It's ready" : "Building your video"}>
+      <StepHeading step={7} eyebrow="Step 7 · Creating the video" title={rendered ? "It's ready" : "Building your video"}>
         {rendered ? "Choose a cover and grab your post text, then watch it." : "About 4 minutes. Get your post ready meanwhile."}
       </StepHeading>
 

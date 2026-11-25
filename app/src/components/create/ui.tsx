@@ -2,40 +2,66 @@
 
 import Image from "next/image";
 import Link from "next/link";
-import { useSyncExternalStore, type ButtonHTMLAttributes, type CSSProperties, type ReactNode } from "react";
+import { useEffect, useState, useSyncExternalStore, type ButtonHTMLAttributes, type CSSProperties, type ReactNode } from "react";
 import { createPortal } from "react-dom";
 
 const noSubscribe = () => () => {};
 /** False during server render and hydration, true after: safe to use document. */
 export const useMounted = () => useSyncExternalStore(noSubscribe, () => true, () => false);
 
-export const TOTAL_STEPS = 8;
+/** Listed steps in the desktop rail (start UI merges 1–2). */
+export const TOTAL_STEPS = 7;
+
+/**
+ * Map the internal flow step (1–7) to the listed rail step (1–7).
+ * Audience is listed as 2; build + result both map to 7.
+ */
+export function listedStep(flowStep: number, audienceRecovery = false): number {
+  if (audienceRecovery) return 2;
+  if (flowStep <= 1) return 1;
+  if (flowStep >= 6) return 7;
+  return flowStep + 1;
+}
 
 const cx = (...parts: (string | false | null | undefined)[]) => parts.filter(Boolean).join(" ");
 export { cx };
 
-/** Top bar: back arrow, logo and a thin yellow progress bar with "Step N of 8". */
-export function TopBar({ step, onBack }: { step: number; onBack?: () => void }) {
+function subscribeLg(cb: () => void) {
+  const mq = window.matchMedia("(min-width: 1024px)");
+  mq.addEventListener("change", cb);
+  return () => mq.removeEventListener("change", cb);
+}
+/** True at the `lg` breakpoint (desktop create chrome). */
+export const useDesktop = () => useSyncExternalStore(subscribeLg, () => window.matchMedia("(min-width: 1024px)").matches, () => false);
+
+/** Top bar: logo on the left, optional action on the right, yellow progress bar. */
+export function TopBar({
+  step,
+  onBack,
+  action,
+}: {
+  step: number;
+  onBack?: () => void;
+  action?: ReactNode;
+}) {
   return (
     <div className="sticky top-0 z-20 bg-white/90 backdrop-blur-md">
-      <div className="mx-auto flex h-14 w-full max-w-md items-center justify-between px-4">
-        <div className="w-10">
-          {onBack && (
-            <button
-              type="button"
-              onClick={onBack}
-              aria-label="Back"
-              className="-ml-2 flex h-10 w-10 items-center justify-center rounded-full text-neutral-800 transition hover:bg-neutral-100 active:scale-95"
-            >
-              <svg width="20" height="20" viewBox="0 0 24 24" fill="none" aria-hidden>
-                <path d="M15 5l-7 7 7 7" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" />
-              </svg>
-            </button>
-          )}
-        </div>
+      <div className="mx-auto flex h-14 w-full max-w-md items-center gap-2 px-4 lg:max-w-6xl lg:px-6">
+        {onBack && (
+          <button
+            type="button"
+            onClick={onBack}
+            aria-label="Back"
+            className="-ml-2 flex h-10 w-10 shrink-0 items-center justify-center rounded-full text-neutral-800 transition hover:bg-neutral-100 active:scale-95"
+          >
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" aria-hidden>
+              <path d="M15 5l-7 7 7 7" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" />
+            </svg>
+          </button>
+        )}
         {/* The JPG (303x172) has empty space above and below the artwork (rows 49-156):
             show only the artwork, 31 px tall. */}
-        <Link href="/" aria-label="ArticL home" className="inline-flex h-[31px] overflow-hidden">
+        <Link href="/" aria-label="ArticL home" className="inline-flex h-[31px] shrink-0 overflow-hidden">
           <Image
             src="/logos/header-logo.jpg"
             alt="ArticL"
@@ -45,11 +71,9 @@ export function TopBar({ step, onBack }: { step: number; onBack?: () => void }) 
             priority
           />
         </Link>
-        <span className="w-10 text-right text-[11px] font-medium tabular-nums text-neutral-400">
-          {step}/{TOTAL_STEPS}
-        </span>
+        <div className="ml-auto flex shrink-0 items-center">{action}</div>
       </div>
-      <div className="mx-auto h-[3px] w-full max-w-md px-4">
+      <div className="mx-auto h-[3px] w-full max-w-md px-4 lg:max-w-6xl lg:px-6">
         <div className="h-full overflow-hidden rounded-full bg-neutral-100">
           <div
             className="h-full rounded-full bg-brand transition-[width] duration-500 ease-out"
@@ -61,30 +85,107 @@ export function TopBar({ step, onBack }: { step: number; onBack?: () => void }) 
   );
 }
 
-/** Step heading: small label, big title, short helper line. */
-export function StepHeading({ eyebrow, title, children }: { eyebrow: string; title: string; children?: ReactNode }) {
+/** Step heading: grey label + step count, big title, short helper line. */
+export function StepHeading({
+  step,
+  eyebrow,
+  title,
+  children,
+}: {
+  step: number;
+  eyebrow: string;
+  title: string;
+  children?: ReactNode;
+}) {
   return (
     <header className="pt-6 pb-5">
-      <p className="text-[11px] font-semibold uppercase tracking-[0.14em] text-neutral-400">{eyebrow}</p>
+      <div className="flex items-center justify-between gap-3">
+        <p className="text-[11px] font-semibold uppercase tracking-[0.14em] text-neutral-400">{eyebrow}</p>
+        <span className="shrink-0 text-[11px] font-medium tabular-nums text-neutral-400">
+          {step}/{TOTAL_STEPS}
+        </span>
+      </div>
       <h1 className="mt-2 text-[28px] font-semibold leading-[1.12] tracking-[-0.02em] text-neutral-950">{title}</h1>
       {children && <p className="mt-2 text-[15px] leading-relaxed text-neutral-500">{children}</p>}
     </header>
   );
 }
 
-/** Bottom action bar in thumb reach, above the iPhone home indicator. */
-export function ActionBar({ children, note }: { children: ReactNode; note?: ReactNode }) {
-  // Portaled to <body>: a moving (transformed) parent would otherwise carry the fixed bar with it.
+/** Tracks `#a2r-left-col` so a fixed ActionBar can match the left pane on desktop. */
+function useLeftColumnBox(enabled: boolean) {
+  const [box, setBox] = useState<{ left: number; width: number } | null>(null);
+  useEffect(() => {
+    if (!enabled) {
+      setBox(null);
+      return;
+    }
+    const el = document.getElementById("a2r-left-col");
+    if (!el) return;
+    const update = () => {
+      const r = el.getBoundingClientRect();
+      setBox({ left: r.left, width: r.width });
+    };
+    update();
+    const ro = new ResizeObserver(update);
+    ro.observe(el);
+    window.addEventListener("resize", update);
+    return () => {
+      ro.disconnect();
+      window.removeEventListener("resize", update);
+    };
+  }, [enabled]);
+  return box;
+}
+
+/**
+ * Bottom action bar. Portaled so a transformed step parent can't carry it.
+ * `pin="viewport"` stays fixed to the screen (width matches the left column on desktop);
+ * `pin="column"` docks in the desktop left-column slot when present.
+ */
+export function ActionBar({
+  children,
+  note,
+  pin = "column",
+}: {
+  children: ReactNode;
+  note?: ReactNode;
+  pin?: "column" | "viewport";
+}) {
   const mounted = useMounted();
+  const desktop = useDesktop();
+  const leftBox = useLeftColumnBox(mounted && pin === "viewport" && desktop);
   if (!mounted) return null;
+  const slot = pin === "column" && desktop ? document.getElementById("a2r-action-slot") : null;
+  const target = slot ?? document.body;
+  const docked = target !== document.body;
+  const pinnedToColumn = !docked && pin === "viewport" && desktop && leftBox;
   return createPortal(
-    <div className="a2r fixed inset-x-0 bottom-0 z-20 border-t border-neutral-100 bg-white/92 backdrop-blur-md">
-      <div className="mx-auto w-full max-w-md px-4 pt-3 pb-[max(0.85rem,env(safe-area-inset-bottom))]">
+    <div
+      className={cx(
+        "a2r z-20 border-t border-neutral-100 bg-white/92 backdrop-blur-md",
+        docked ? "pointer-events-auto relative mt-6 w-full" : "fixed bottom-0",
+        !docked && !pinnedToColumn && "inset-x-0",
+      )}
+      style={
+        pinnedToColumn
+          ? { left: leftBox.left, width: leftBox.width, right: "auto" }
+          : undefined
+      }
+    >
+      <div
+        className={cx(
+          "w-full pt-3",
+          docked
+            ? "px-0 pb-3"
+            : "px-4 pb-[max(0.85rem,env(safe-area-inset-bottom))]",
+          !docked && !pinnedToColumn && "mx-auto max-w-md",
+        )}
+      >
         {note && <div className="mb-2 text-center text-[12px] text-neutral-500">{note}</div>}
-        <div className="flex gap-2">{children}</div>
+        <div className="flex w-full gap-2">{children}</div>
       </div>
     </div>,
-    document.body,
+    target,
   );
 }
 

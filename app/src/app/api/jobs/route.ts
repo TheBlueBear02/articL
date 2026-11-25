@@ -23,15 +23,18 @@ export async function POST(request: Request) {
   const id = crypto.randomUUID();
   const filePath = `${id}.pdf`;
 
+  // /create: audience is chosen on step 2 via POST /audience (only confirm when sent here).
+  const createFlow = body?.flow === "create";
+  const audienceGiven = body?.audience != null && body?.audience !== "";
   const { error: insertError } = await supabase
     .from("jobs")
-    // flow "create": the new mobile flow (/create), which asks for the audience after the upload.
     .insert({
       id,
       original_filename: filename,
       file_path: filePath,
       ...audienceColumn(parsed.audience),
-      ...(body?.flow === "create" ? { flow: "create" } : {}),
+      ...(createFlow ? { flow: "create" } : {}),
+      ...(createFlow && audienceGiven ? { audience_confirmed: true } : {}),
     });
   if (insertError) {
     return Response.json({ error: `Could not create job: ${insertError.message}` }, { status: 500 });

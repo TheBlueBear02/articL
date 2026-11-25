@@ -38,7 +38,7 @@ export function scriptBlocks(job: Job): Block[] {
   });
 }
 
-/** Step 6: read the script block by block, accept softer wording where it overclaims, approve. */
+/** Step 5: read the script block by block, accept softer wording where it overclaims, approve. */
 export function StepReview({ job, onDone }: { job: Job; onDone: () => void }) {
   const ready = job.status === "awaiting_review";
   const blocks = ready ? scriptBlocks(job) : [];
@@ -74,7 +74,7 @@ export function StepReview({ job, onDone }: { job: Job; onDone: () => void }) {
 
   return (
     <>
-      <StepHeading eyebrow="Step 6 · Script" title="Review your script">
+      <StepHeading step={6} eyebrow="Step 6 · Writing video script" title="Review your script">
         Tap a block to see its line and the quote behind it.
         {job.total_duration_s && ready ? ` About ${Math.round(job.total_duration_s)} seconds.` : ""}
       </StepHeading>

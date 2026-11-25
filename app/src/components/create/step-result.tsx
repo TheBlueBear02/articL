@@ -8,7 +8,7 @@ import { Button, Card, ErrorNote, Spinner, StepHeading } from "./ui";
 import { PostTextCard } from "./step-build";
 import { post, track } from "./use-job";
 
-/** Step 8: the finished reel, with download, share, post text and what to do next. */
+/** Step 7: the finished reel, with download, share, post text and what to do next. */
 export function StepResult({ job }: { job: Job }) {
   const router = useRouter();
   const [links, setLinks] = useState<{ url: string; downloadUrl: string } | null>(null);
@@ -62,7 +62,7 @@ export function StepResult({ job }: { job: Job }) {
 
   return (
     <>
-      <StepHeading eyebrow="Step 8 · Your reel" title="Ready to post" />
+      <StepHeading step={7} eyebrow="Step 7 · Creating the video" title="Ready to post" />
 
       <div className="a2r-rise mx-auto aspect-[9/16] w-full max-w-[300px] overflow-hidden rounded-[28px] bg-neutral-950 shadow-[0_30px_60px_-30px_rgba(0,0,0,0.5)]">
         {links ? (
