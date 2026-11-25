@@ -26,22 +26,33 @@ const FAQS: { q: string; a: string }[] = [
 ];
 
 /**
- * Home-page Q&A: white and quiet, with vertical yellow lines from the logo L.
+ * Q&A accordion: white and quiet, with vertical yellow lines from the logo L.
+ * `compact` tightens padding and type for the narrow /create column (and small phones).
  */
-export function HomeFaq() {
+export function HomeFaq({ compact = false }: { compact?: boolean }) {
   const baseId = useId();
   const [open, setOpen] = useState<number | null>(0);
 
   return (
-    <section className="relative mt-16 overflow-hidden rounded-3xl border border-neutral-200/70 bg-white px-5 py-10 sm:mt-20 sm:px-10 sm:py-12">
+    <section
+      className={
+        compact
+          ? "relative mt-10 overflow-hidden rounded-[22px] border border-neutral-200/70 bg-white px-4 py-8"
+          : "relative mt-16 overflow-hidden rounded-3xl border border-neutral-200/70 bg-white px-5 py-10 sm:mt-20 sm:px-10 sm:py-12"
+      }
+    >
       {/* More vertical yellow lines from the right; fade out before the questions */}
       <div
-        className="pointer-events-none absolute inset-y-0 right-0 w-[78%] sm:w-[70%] lg:w-[62%]"
+        className={
+          compact
+            ? "pointer-events-none absolute inset-y-0 right-0 w-[55%]"
+            : "pointer-events-none absolute inset-y-0 right-0 w-[58%] sm:w-[52%] lg:w-[46%]"
+        }
         style={{
           WebkitMaskImage:
-            "linear-gradient(90deg, transparent 0%, transparent 22%, rgba(0,0,0,0.12) 42%, rgba(0,0,0,0.4) 62%, rgba(0,0,0,0.78) 82%, #000 100%)",
+            "linear-gradient(90deg, transparent 0%, transparent 35%, rgba(0,0,0,0.08) 55%, rgba(0,0,0,0.3) 72%, rgba(0,0,0,0.72) 88%, #000 100%)",
           maskImage:
-            "linear-gradient(90deg, transparent 0%, transparent 22%, rgba(0,0,0,0.12) 42%, rgba(0,0,0,0.4) 62%, rgba(0,0,0,0.78) 82%, #000 100%)",
+            "linear-gradient(90deg, transparent 0%, transparent 35%, rgba(0,0,0,0.08) 55%, rgba(0,0,0,0.3) 72%, rgba(0,0,0,0.72) 88%, #000 100%)",
         }}
         aria-hidden
       >
@@ -50,13 +61,19 @@ export function HomeFaq() {
 
       <div className="relative z-10 max-w-2xl">
         <p className="text-[11px] font-semibold tracking-[0.18em] text-brand uppercase">Q&A</p>
-        <h2 className="mt-1 text-3xl font-semibold tracking-tight text-neutral-950 sm:text-4xl lg:text-[2.75rem] lg:leading-tight">
+        <h2
+          className={
+            compact
+              ? "mt-1 text-[1.65rem] font-semibold leading-tight tracking-tight text-neutral-950"
+              : "mt-1 text-3xl font-semibold tracking-tight text-neutral-950 sm:text-4xl lg:text-[2.75rem] lg:leading-tight"
+          }
+        >
           Have a question?
           <br />
           We have answers
         </h2>
 
-        <ul className="mt-8 divide-y divide-neutral-200/90 border-y border-neutral-200/90">
+        <ul className={`divide-y divide-neutral-200/90 border-y border-neutral-200/90 ${compact ? "mt-6" : "mt-8"}`}>
           {FAQS.map((item, i) => {
             const isOpen = open === i;
             const panelId = `${baseId}-panel-${i}`;
@@ -69,9 +86,11 @@ export function HomeFaq() {
                   aria-expanded={isOpen}
                   aria-controls={panelId}
                   onClick={() => setOpen(isOpen ? null : i)}
-                  className="flex w-full items-start justify-between gap-4 py-4 text-left"
+                  className={`flex w-full cursor-pointer items-start justify-between gap-3 text-left ${compact ? "py-3.5" : "gap-4 py-4"}`}
                 >
-                  <span className="text-[15px] font-medium tracking-tight text-neutral-900 sm:text-base">{item.q}</span>
+                  <span className={`font-medium tracking-tight text-neutral-900 ${compact ? "text-[14px] leading-snug" : "text-[15px] sm:text-base"}`}>
+                    {item.q}
+                  </span>
                   <span className="mt-0.5 shrink-0 text-xl leading-none font-light text-neutral-950" aria-hidden>
                     {isOpen ? "–" : "+"}
                   </span>
@@ -85,7 +104,9 @@ export function HomeFaq() {
                   }`}
                 >
                   <div className="overflow-hidden">
-                    <p className="pb-4 pr-10 text-sm leading-relaxed text-neutral-600 sm:text-[15px]">{item.a}</p>
+                    <p className={`leading-relaxed text-neutral-600 ${compact ? "pb-3.5 pr-6 text-[13px]" : "pb-4 pr-10 text-sm sm:text-[15px]"}`}>
+                      {item.a}
+                    </p>
                   </div>
                 </div>
               </li>

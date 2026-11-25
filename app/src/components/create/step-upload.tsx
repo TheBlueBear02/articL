@@ -3,8 +3,10 @@
 import { useRef, useState, type CSSProperties } from "react";
 import type { Job } from "@/lib/jobs";
 import { ActionBar, Button, Card, ErrorNote, Skeleton, StepHeading, Working, cx } from "./ui";
+import { HomeFaq } from "@/components/home-faq";
 import { RecentReels } from "./recent-reels";
 import { AudienceTypes } from "./audience-types";
+import { CreateReviews } from "./create-reviews";
 import { PaperToReel } from "./paper-to-reel";
 
 /** Step 1: pick a PDF. Choosing a file moves on to audience (see CreateStart); this only hands it over. */
@@ -24,8 +26,9 @@ export function UploadDrop({ onPick, error }: { onPick: (file: File) => void; er
 
       <Card
         as="label"
+        id="a2r-upload-pdf"
         className={cx(
-          "flex cursor-pointer flex-col items-center justify-center gap-4 border-dashed border-neutral-300 bg-neutral-100! px-6 py-14 text-center",
+          "flex scroll-mt-20 cursor-pointer flex-col items-center justify-center gap-4 border-dashed border-neutral-300 bg-neutral-100! px-6 py-14 text-center",
           dragging && "border-transparent bg-[var(--a2r-brand-tint)]! shadow-[0_0_0_2px_var(--a2r-brand)]",
         )}
         onDragOver={(e: React.DragEvent) => {
@@ -81,6 +84,11 @@ export function UploadDrop({ onPick, error }: { onPick: (file: File) => void; er
       <AudienceTypes />
 
       <RecentReels />
+
+      <HomeFaq compact />
+
+      {/* Desktop shows the same list under the right-column rail. */}
+      <CreateReviews className="mt-10 lg:hidden" />
 
       <ActionBar pin="viewport">
         <Button onClick={() => inputRef.current?.click()}>Upload PDF</Button>

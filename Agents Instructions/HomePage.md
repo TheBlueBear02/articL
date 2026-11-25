@@ -13,10 +13,10 @@ The ArticL mark ends in a yellow **L** whose upright is **four vertical parallel
 
 - **SVG mark:** `BrandVerticalLines` in `app/src/components/brand-lines.tsx` (default 4 strokes).
 - **Section wash:** `.brand-lines-section` in `globals.css` — repeating vertical yellow lines; fade with a mask on a decorative layer so copy stays on white.
-- **Q&A:** `HomeFaq` — white panel; denser vertical lines from the right fade toward the copy; yellow “Q&A” eyebrow; larger two-line headline. Accordion rows are dividers only (no cards).
+- **Q&A:** `HomeFaq` — white panel; denser vertical lines from the right fade toward the copy; yellow “Q&A” eyebrow; larger two-line headline. Accordion rows are dividers only (no cards). Same component on `/create` step 1 via `compact` for the narrow column.
 
 ## Components
 
 - `page.tsx` — upload/start flow + mounts carousel and FAQ.
-- `HomeFaq` — client accordion; one open panel at a time (first open by default).
+- `HomeFaq` — client accordion; one open panel at a time (first open by default). Optional `compact` for create / mobile-narrow layouts.
 - `ReelCarousel` — finished videos only; limit 6.

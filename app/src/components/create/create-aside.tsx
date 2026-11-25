@@ -4,6 +4,7 @@ import { useEffect, useState } from "react";
 import type { Job } from "@/lib/jobs";
 import { formatEstimate, type EstimateKey } from "@/lib/create-estimates";
 import { TOTAL_STEPS, cx, Spinner } from "./ui";
+import { CreateReviews } from "./create-reviews";
 import { PaperToReel } from "./paper-to-reel";
 import { useMediaLinks } from "./step-build";
 import { scriptBlocks } from "./step-review";
@@ -55,12 +56,14 @@ export function CreateAside({
   }, []);
 
   return (
-    <aside className="hidden h-full pt-6 lg:sticky lg:top-20 lg:flex lg:flex-col lg:gap-5">
+    <aside className="hidden pt-6 lg:flex lg:flex-col lg:gap-5">
       <PhoneFrame>
         <PhonePreview step={step} job={job} />
       </PhoneFrame>
       <div className="h-px w-full bg-neutral-200" role="separator" />
       <StepRail step={listed} estimates={estimates} />
+      <div className="h-px w-full bg-neutral-200" role="separator" />
+      <CreateReviews />
     </aside>
   );
 }

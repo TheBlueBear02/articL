@@ -1,4 +1,5 @@
-import type { JobStatus } from "./jobs";
+import type { Addons, JobStatus } from "./jobs";
+import type { JobUsage } from "./pricing";
 import type { StageTimes } from "./timing";
 
 /** Automated create-flow phases that show a moving-average estimate in the step rail. */
@@ -13,9 +14,21 @@ const WINDOWS: Record<EstimateKey, { from: (JobStatus | "created")[]; to: JobSta
   findings: { from: ["extracting", "uploaded", "proposing"], to: "awaiting_findings" },
   // Script + voice, until the review screen is ready.
   script: { from: ["scripting", "points_selected"], to: "awaiting_review" },
-  // B-roll + render, until the video is ready.
+  // B-roll + cloud render, until the video is ready.
+  // The /api/create/estimates average for this key only uses cloud-rendered jobs (see wasCloudRendered).
   video: { from: ["fetching_broll", "rendering"], to: "rendered" },
 };
+
+/**
+ * True when the job actually rendered on HeyGen Cloud.
+ * Prefer usage (`render:cloud` is only written after a successful cloud render); fall back to the
+ * chosen add-on when usage is missing (older rows / failed usage write).
+ */
+export function wasCloudRendered(addons: Addons | null | undefined, usage: JobUsage | null | undefined): boolean {
+  const cloudUsage = usage?.["render:cloud"];
+  if (cloudUsage && typeof cloudUsage === "object" && "renderSeconds" in cloudUsage) return true;
+  return addons?.render === "cloud";
+}
 
 export const ESTIMATE_KEYS = Object.keys(WINDOWS) as EstimateKey[];
 
